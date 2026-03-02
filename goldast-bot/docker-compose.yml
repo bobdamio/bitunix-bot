@@ -1,0 +1,41 @@
+# GoldasT Bot v2 - Docker Compose
+# Usage:
+#   cp .env.example .env        # Fill in your credentials
+#   docker compose up -d        # Start bot
+#   docker compose logs -f      # Watch logs
+#   docker compose down         # Stop bot
+
+services:
+  goldast-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: goldast-bot
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    volumes:
+      # Persist logs and database
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Mount config (edit on host, rotation auto-saves)
+      - ./config.yaml:/app/config.yaml
+
+    environment:
+      - TZ=UTC
+
+    # Memory limit to prevent OOM on VPS
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

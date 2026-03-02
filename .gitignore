@@ -1,0 +1,60 @@
+# Ignore everything at root level
+/*
+
+# Allow essentials at root
+!README.md
+!.gitignore
+
+# Allow goldast-bot folder
+!goldast-bot/
+
+# ===== Inside goldast-bot =====
+
+# Environment variables and secrets
+goldast-bot/.env
+goldast-bot/.env.*
+!goldast-bot/.env.example
+
+# Configuration files with sensitive data
+goldast-bot/config.yaml
+goldast-bot/config.yaml.example
+
+# Pine Script strategy (proprietary)
+goldast-bot/ETH_main.pine
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Logs
+logs/
+*.log
+
+# Trade history and data
+trade_history/
+reports/
+data/
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+volumes/
+
+# Keep .gitignore itself
+!.gitignore

@@ -1,0 +1,16 @@
+# GoldasT Bot v2 Requirements
+
+# WebSocket client
+websockets>=10.4
+
+# YAML config
+pyyaml>=6.0
+
+# Async utilities
+aiohttp>=3.8.0
+
+# Environment variable support
+python-dotenv>=1.0.0
+
+# Telegram bot
+python-telegram-bot>=20.0
