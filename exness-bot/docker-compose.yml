@@ -25,6 +25,8 @@ services:
 
     environment:
       - TZ=UTC
+      - MT5_SERVER=${MT5_SERVER}
+      - MT5_LOGIN=${MT5_LOGIN}
       - MT5_PASSWORD=${MT5_PASSWORD}
 
     # Memory limit to prevent OOM on VPS

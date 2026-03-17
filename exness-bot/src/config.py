@@ -245,8 +245,12 @@ def load_config(path: str = "config.yaml") -> Config:
     if "symbols" in raw:
         config.symbols = raw["symbols"]
 
-    # Resolve MT5 password from env var
-    config.mt5.password = _resolve_env_vars(config.mt5.password)
+    # Resolve MT5 credentials from env vars
+    config.mt5.server = _resolve_env_vars(str(config.mt5.server))
+    login_str = _resolve_env_vars(str(config.mt5.login))
+    if login_str.isdigit():
+        config.mt5.login = int(login_str)
+    config.mt5.password = _resolve_env_vars(str(config.mt5.password))
 
     logger.info(f"Config loaded from {path}: {len(config.symbols)} symbols")
     return config

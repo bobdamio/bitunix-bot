@@ -2,8 +2,8 @@
 # Copy to config.yaml and fill in your credentials
 
 mt5:
-  server: "Exness-MT5Trial15"
-  login: 260474980
+  server: "${MT5_SERVER}"
+  login: "${MT5_LOGIN}"
   password: "${MT5_PASSWORD}"
   timeout: 30000
 

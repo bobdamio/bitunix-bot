@@ -239,8 +239,10 @@ cd /home/goldast/projects/bitunix-bot/exness-bot
 # Run automated setup
 bash scripts/setup.sh
 
-# Set your MT5 password
-echo 'MT5_PASSWORD=YOUR_PASSWORD_HERE' > .env
+# Set your MT5 credentials
+cp .env.example .env
+# Edit .env with your server, login, password
+nano .env
 
 # Start
 bash scripts/start.sh
@@ -252,7 +254,9 @@ bash scripts/start.sh
 cd /home/goldast/projects/bitunix-bot/exness-bot
 
 # Set credentials
-echo 'MT5_PASSWORD=YOUR_PASSWORD_HERE' > .env
+cp .env.example .env
+# Edit: MT5_SERVER, MT5_LOGIN, MT5_PASSWORD
+nano .env
 
 # Build and start
 docker compose up -d
@@ -267,8 +271,9 @@ docker compose logs -f
 # First run setup.sh (creates the service file)
 bash scripts/setup.sh
 
-# Set password
-echo 'MT5_PASSWORD=YOUR_PASSWORD_HERE' > .env
+# Set credentials
+cp .env.example .env
+nano .env  # MT5_SERVER, MT5_LOGIN, MT5_PASSWORD
 
 # Enable and start
 sudo systemctl enable exness-bot
@@ -324,6 +329,8 @@ journalctl -u exness-bot -f          # Live logs
 
 ```bash
 source venv/bin/activate
+export MT5_SERVER="Exness-MT5Trial15"
+export MT5_LOGIN="260474980"
 export MT5_PASSWORD="YOUR_PASSWORD_HERE"
 python main.py
 ```
@@ -336,9 +343,9 @@ python main.py
 
 | Param | Value | Description |
 |-------|-------|-------------|
-| `server` | `Exness-MT5Trial15` | Exness MT5 server name |
-| `login` | `260474980` | MT5 account number |
-| `password` | `${MT5_PASSWORD}` | From .env file |
+| `server` | `${MT5_SERVER}` | From .env — Exness MT5 server name |
+| `login` | `${MT5_LOGIN}` | From .env — MT5 account number |
+| `password` | `${MT5_PASSWORD}` | From .env — MT5 trading password |
 | `timeout` | `30000` | Connection timeout (ms) |
 
 ### Symbols (`symbols:`)
