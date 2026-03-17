@@ -8,6 +8,20 @@
 # Allow goldast-bot folder
 !goldast-bot/
 
+# Allow exness-bot folder
+!exness-bot/
+
+# ===== Inside exness-bot =====
+
+# Environment variables and secrets
+exness-bot/.env
+exness-bot/.env.*
+!exness-bot/.env.example
+
+# Configuration files with sensitive data (keep example)
+exness-bot/config.yaml
+!exness-bot/config.yaml.example
+
 # ===== Inside goldast-bot =====
 
 # Environment variables and secrets

@@ -1,0 +1,30 @@
+# Exness Bot - Config Example
+# Copy to config.yaml and fill in your credentials
+
+mt5:
+  server: "Exness-MT5Trial15"
+  login: 260474980
+  password: "${MT5_PASSWORD}"
+  timeout: 30000
+
+symbols:
+  - XAUUSD
+  - USOIL
+
+account:
+  hedge_mode: true
+  magic_number: 202603
+  deviation: 20
+  fill_type: "IOC"
+
+position:
+  risk_percent: 0.02
+  min_lot: 0.01
+  max_lot: 1.0
+  max_positions: 3
+  max_positions_per_symbol: 2
+
+telegram:
+  enabled: false
+  bot_token: ""
+  allowed_users: []
