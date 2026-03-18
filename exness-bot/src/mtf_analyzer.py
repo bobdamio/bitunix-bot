@@ -117,9 +117,24 @@ class MTFAnalyzer:
         if len(candles_m1) >= 5:
             ltf_ms.warmup(candles_m1)
 
+        # Diagnostic: log what was found
+        total_fvgs = len(fvgs_1m) + len(fvgs_5m) + len(fvgs_15m)
+        total_zones = len(supply_zones_15m) + len(demand_zones_15m)
+        if total_fvgs == 0:
+            logger.info(f"{symbol}: No FVGs found on any timeframe (price={fmt_price(current_price)})")
+        elif total_zones == 0:
+            logger.info(f"{symbol}: {total_fvgs} FVGs found but no 15m zones")
+        else:
+            logger.info(
+                f"{symbol}: {len(fvgs_1m)} FVG(M1) + {len(fvgs_5m)} FVG(M5) + {len(fvgs_15m)} FVG(M15) | "
+                f"{len(supply_zones_15m)} supply + {len(demand_zones_15m)} demand zones"
+            )
+
         # Step 4: Find best confluence setup
         best_setup = None
         best_score = 0.0
+        overlap_checked = 0
+        overlap_found = 0
 
         # Check SELL setups: FVG inside Supply zone
         for supply_zone in supply_zones_15m:
@@ -127,14 +142,15 @@ class MTFAnalyzer:
                 continue
 
             # Look for SHORT FVGs (5m or 1m) inside this supply zone
-            for fvg in fvgs_1m + fvgs_5m:
-                if fvg.direction != TradeDirection.SHORT:
-                    continue
+            short_fvgs = [f for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.SHORT]
+            for fvg in short_fvgs:
+                overlap_checked += 1
 
                 # Check if FVG overlaps with supply zone
                 overlap_zone = self.sd_detector.find_fvg_in_zone(fvg, [supply_zone])
                 if overlap_zone is None:
                     continue
+                overlap_found += 1
 
                 # Calculate confluence score
                 score = self._calculate_confluence_score(
@@ -161,13 +177,14 @@ class MTFAnalyzer:
             if demand_zone.is_broken or demand_zone.touch_count >= 3:
                 continue
 
-            for fvg in fvgs_1m + fvgs_5m:
-                if fvg.direction != TradeDirection.LONG:
-                    continue
+            long_fvgs = [f for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.LONG]
+            for fvg in long_fvgs:
+                overlap_checked += 1
 
                 overlap_zone = self.sd_detector.find_fvg_in_zone(fvg, [demand_zone])
                 if overlap_zone is None:
                     continue
+                overlap_found += 1
 
                 score = self._calculate_confluence_score(
                     fvg, demand_zone, htf_ms, mtf_ms, ltf_ms,
@@ -187,6 +204,13 @@ class MTFAnalyzer:
                         "order_type": "MARKET",
                         "htf_trend": htf_ms.trend.value,
                     }
+
+        # Diagnostic: why no setup?
+        if best_setup is None and overlap_checked > 0:
+            if overlap_found == 0:
+                logger.info(f"{symbol}: {overlap_checked} FVG-zone pairs checked, none overlap")
+            else:
+                logger.info(f"{symbol}: {overlap_found} overlaps found but confluence < {self.config.min_confluence_score} (best={best_score:.2f})")
 
         # Step 5: Check for Buy Stop / Sell Stop opportunities
         if best_setup is None:

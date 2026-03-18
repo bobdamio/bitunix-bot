@@ -137,13 +137,13 @@ class SupplyDemandDetector:
         demand_zones = demand_zones[:self.config.max_zones_per_side]
 
         if supply_zones:
-            logger.info(
+            logger.debug(
                 f"Supply zones [{timeframe}] {symbol}: {len(supply_zones)} found | "
                 f"Best: {fmt_price(supply_zones[0].bottom)}-{fmt_price(supply_zones[0].top)} "
                 f"strength={supply_zones[0].strength:.2f}"
             )
         if demand_zones:
-            logger.info(
+            logger.debug(
                 f"Demand zones [{timeframe}] {symbol}: {len(demand_zones)} found | "
                 f"Best: {fmt_price(demand_zones[0].bottom)}-{fmt_price(demand_zones[0].top)} "
                 f"strength={demand_zones[0].strength:.2f}"
