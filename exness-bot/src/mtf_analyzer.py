@@ -145,8 +145,8 @@ class MTFAnalyzer:
             )
 
         # Step 4: Find best confluence setup
-        best_setup = None
-        best_score = 0.0
+        # Collect ALL valid setups, then pick closest FVG to price
+        valid_setups = []
         overlap_checked = 0
         overlap_found = 0
         no_overlap_details = []
@@ -177,10 +177,9 @@ class MTFAnalyzer:
                     fvgs_15m, supply_zones_5m, current_price
                 )
 
-                if score > best_score and score >= self.config.min_confluence_score:
+                if score >= self.config.min_confluence_score:
                     support, resistance = htf_ms.get_support_resistance()
-                    best_score = score
-                    best_setup = {
+                    valid_setups.append({
                         "direction": TradeDirection.SHORT,
                         "entry_fvg": fvg,
                         "zone": supply_zone,
@@ -189,7 +188,8 @@ class MTFAnalyzer:
                         "resistance": resistance,
                         "order_type": "MARKET",
                         "htf_trend": htf_ms.trend.value,
-                    }
+                        "_fvg_dist": abs(current_price - fvg.mid_price),
+                    })
 
         # Check BUY setups: FVG inside Demand zone
         for demand_zone in demand_zones_15m:
@@ -214,10 +214,9 @@ class MTFAnalyzer:
                     fvgs_15m, demand_zones_5m, current_price
                 )
 
-                if score > best_score and score >= self.config.min_confluence_score:
+                if score >= self.config.min_confluence_score:
                     support, resistance = htf_ms.get_support_resistance()
-                    best_score = score
-                    best_setup = {
+                    valid_setups.append({
                         "direction": TradeDirection.LONG,
                         "entry_fvg": fvg,
                         "zone": demand_zone,
@@ -226,7 +225,23 @@ class MTFAnalyzer:
                         "resistance": resistance,
                         "order_type": "MARKET",
                         "htf_trend": htf_ms.trend.value,
-                    }
+                        "_fvg_dist": abs(current_price - fvg.mid_price),
+                    })
+
+        # Pick best: closest FVG to price first, then highest confluence
+        best_setup = None
+        best_score = 0.0
+        if valid_setups:
+            valid_setups.sort(key=lambda s: (s["_fvg_dist"], -s["confluence_score"]))
+            best_setup = valid_setups[0]
+            best_score = best_setup["confluence_score"]
+            if len(valid_setups) > 1:
+                logger.info(
+                    f"{symbol}: {len(valid_setups)} valid setups, picked closest FVG "
+                    f"{fmt_price(best_setup['entry_fvg'].bottom)}-{fmt_price(best_setup['entry_fvg'].top)} "
+                    f"(dist={best_setup['_fvg_dist']:.1f})"
+                )
+            del best_setup["_fvg_dist"]
 
         # Diagnostic: why no setup?
         if best_setup is None and overlap_checked > 0:
