@@ -207,6 +207,7 @@ class MTFAnalyzer:
         overlap_checked = 0
         overlap_found = 0
         confluence_passed = 0
+        waiting_setups = []  # setups with confluence but price not in entry zone
         no_overlap_details = []
 
         # Check SELL setups: FVG inside Supply zone
@@ -241,6 +242,10 @@ class MTFAnalyzer:
                     # Use read-only check to avoid mutating FVG state
                     can_enter = self._is_fvg_enterable(fvg, current_price)
                     if not can_enter:
+                        waiting_setups.append({
+                            "dir": "SHORT", "fvg": fvg, "score": score,
+                            "dist": abs(current_price - fvg.mid_price),
+                        })
                         continue
                     support, resistance = htf_ms.get_support_resistance()
                     valid_setups.append({
@@ -284,6 +289,10 @@ class MTFAnalyzer:
                     # Use read-only check to avoid mutating FVG state
                     can_enter = self._is_fvg_enterable(fvg, current_price)
                     if not can_enter:
+                        waiting_setups.append({
+                            "dir": "LONG", "fvg": fvg, "score": score,
+                            "dist": abs(current_price - fvg.mid_price),
+                        })
                         continue
                     support, resistance = htf_ms.get_support_resistance()
                     valid_setups.append({
@@ -317,8 +326,25 @@ class MTFAnalyzer:
         if best_setup is None and overlap_checked > 0:
             if overlap_found == 0:
                 diag_msg = f"no_overlap:{overlap_checked}:{zone_str}"
+            elif waiting_setups:
+                # Show the nearest waiting setup at INFO (deduplicated)
+                nearest = min(waiting_setups, key=lambda w: w["dist"])
+                nf = nearest["fvg"]
+                diag_msg = (
+                    f"waiting:{nearest['dir']}:{fmt_price(nf.bottom)}-{fmt_price(nf.top)}:"
+                    f"conf={nearest['score']:.2f}:dist={nearest['dist']:.1f}"
+                )
+                if diag_msg != self._last_diag.get(f"{symbol}_reason"):
+                    self._last_diag[f"{symbol}_reason"] = diag_msg
+                    logger.info(
+                        f"{symbol}: Watching {nearest['dir']} setup | "
+                        f"FVG={fmt_price(nf.bottom)}-{fmt_price(nf.top)} | "
+                        f"confluence={nearest['score']:.2f} | "
+                        f"price needs to reach {fmt_price(nf.bottom)}-{fmt_price(nf.top)} "
+                        f"(dist={nearest['dist']:.1f})"
+                    )
+                diag_msg = None  # already handled
             elif confluence_passed > 0:
-                logger.debug(f"{symbol}: {confluence_passed} confluent FVG(s) but price not in entry zone yet")
                 diag_msg = None
             else:
                 diag_msg = f"low_confluence:{overlap_found}:{best_score:.2f}"
