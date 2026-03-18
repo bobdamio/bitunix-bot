@@ -54,6 +54,7 @@ class StrategyEngine:
         self._last_entry_time: Dict[str, datetime] = {}
         self._last_loss_time: Dict[str, datetime] = {}
         self._spent_zones: Dict[str, list] = {}
+        self._blocked_entry_log: Dict[str, datetime] = {}  # suppress repeated log spam
 
     def initialize(self) -> bool:
         """Initialize strategy: connect to MT5, setup symbols."""
@@ -195,11 +196,17 @@ class StrategyEngine:
         if entry_fvg:
             can_enter, reason = self.fvg_detector.check_entry_conditions(entry_fvg, current_price)
             if not can_enter:
-                logger.info(
-                    f"{symbol}: Setup found but entry blocked - {reason} | "
-                    f"price={fmt_price(current_price)} FVG={fmt_price(entry_fvg.bottom)}-{fmt_price(entry_fvg.top)} "
-                    f"fill={entry_fvg.fill_percent*100:.1f}%"
-                )
+                # Suppress repeated log spam: same FVG blocked → log once per 5 min
+                block_key = f"{symbol}_{entry_fvg.bottom}_{entry_fvg.top}"
+                now = datetime.now()
+                last_log = self._blocked_entry_log.get(block_key)
+                if not last_log or (now - last_log).total_seconds() >= 300:
+                    self._blocked_entry_log[block_key] = now
+                    logger.info(
+                        f"{symbol}: Setup found but entry blocked - {reason} | "
+                        f"price={fmt_price(current_price)} FVG={fmt_price(entry_fvg.bottom)}-{fmt_price(entry_fvg.top)} "
+                        f"fill={entry_fvg.fill_percent*100:.1f}%"
+                    )
                 return
 
         # Check zone cooldown

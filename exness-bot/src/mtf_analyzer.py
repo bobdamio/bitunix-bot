@@ -149,6 +149,7 @@ class MTFAnalyzer:
         valid_setups = []
         overlap_checked = 0
         overlap_found = 0
+        confluence_passed = 0
         no_overlap_details = []
 
         # Check SELL setups: FVG inside Supply zone
@@ -178,6 +179,11 @@ class MTFAnalyzer:
                 )
 
                 if score >= self.config.min_confluence_score:
+                    confluence_passed += 1
+                    # Pre-check: is this FVG actually enterable right now?
+                    can_enter, _ = self.fvg_detector.check_entry_conditions(fvg, current_price)
+                    if not can_enter:
+                        continue
                     support, resistance = htf_ms.get_support_resistance()
                     valid_setups.append({
                         "direction": TradeDirection.SHORT,
@@ -215,6 +221,11 @@ class MTFAnalyzer:
                 )
 
                 if score >= self.config.min_confluence_score:
+                    confluence_passed += 1
+                    # Pre-check: is this FVG actually enterable right now?
+                    can_enter, _ = self.fvg_detector.check_entry_conditions(fvg, current_price)
+                    if not can_enter:
+                        continue
                     support, resistance = htf_ms.get_support_resistance()
                     valid_setups.append({
                         "direction": TradeDirection.LONG,
@@ -248,6 +259,8 @@ class MTFAnalyzer:
             if overlap_found == 0:
                 details_str = "; ".join(no_overlap_details[:3])
                 logger.info(f"{symbol}: {overlap_checked} FVG-zone pairs, none overlap: {details_str}")
+            elif confluence_passed > 0:
+                logger.debug(f"{symbol}: {confluence_passed} confluent FVG(s) but price not in entry zone yet")
             else:
                 logger.info(f"{symbol}: {overlap_found} overlaps but confluence < {self.config.min_confluence_score} (best={best_score:.2f})")
         elif best_setup is None and total_zones > 0 and total_fvgs > 0:
