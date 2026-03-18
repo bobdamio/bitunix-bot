@@ -114,7 +114,7 @@ class TPSLCalculator:
             sl_distance = max(sl_distance, min_sl_dist)
             if sl_distance > max_sl_dist:
                 logger.info(
-                    f"📐 SL capped: {sl_distance/entry_price*100:.3f}% → "
+                    f"SL capped: {sl_distance/entry_price*100:.3f}% -> "
                     f"{max_sl_dist/entry_price*100:.3f}%"
                 )
                 sl_distance = max_sl_dist
@@ -137,7 +137,7 @@ class TPSLCalculator:
             sl_distance = max(sl_distance, min_sl_dist)
             if sl_distance > max_sl_dist:
                 logger.info(
-                    f"📐 SL capped: {sl_distance/entry_price*100:.3f}% → "
+                    f"SL capped: {sl_distance/entry_price*100:.3f}% -> "
                     f"{max_sl_dist/entry_price*100:.3f}%"
                 )
                 sl_distance = max_sl_dist
@@ -163,7 +163,7 @@ class TPSLCalculator:
         reward = tp_distance
 
         logger.info(
-            f"📐 TP/SL: entry={fmt_price(entry_price)} "
+            f"TP/SL: entry={fmt_price(entry_price)} "
             f"SL={fmt_price(sl_price)} TP={fmt_price(tp_price)} "
             f"R:R={reward/risk:.1f} ATR={atr:.4f}"
         )

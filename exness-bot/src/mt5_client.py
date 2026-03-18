@@ -361,7 +361,7 @@ class MT5Client:
             return None
 
         logger.info(
-            f"⏳ Pending order placed: {symbol} {order_type} {lot_size} lots @ {price} | "
+            f"Pending order placed: {symbol} {order_type} {lot_size} lots @ {price} | "
             f"ticket={result.order} SL={sl_price} TP={tp_price}"
         )
         return result.order
