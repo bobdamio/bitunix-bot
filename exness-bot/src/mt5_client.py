@@ -487,7 +487,7 @@ class MT5Client:
                 "tp": pos.tp,
                 "profit": pos.profit,
                 "swap": pos.swap,
-                "commission": pos.commission,
+                "commission": getattr(pos, 'commission', 0.0),
                 "magic": pos.magic,
                 "comment": pos.comment,
                 "time": pos.time,
