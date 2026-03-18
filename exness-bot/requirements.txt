@@ -1,6 +1,6 @@
 # Exness Bot - Requirements
 
-# MetaTrader 5 Python integration
+# MetaTrader 5 (Windows only — native API)
 MetaTrader5>=5.0.45
 
 # YAML config

@@ -1,6 +1,6 @@
 """
 Exness Bot - MT5 Connection and Order Management
-Handles all MetaTrader 5 API communication.
+Handles all MetaTrader 5 API communication via native MetaTrader5 package.
 """
 
 import logging
@@ -13,12 +13,18 @@ from .config import MT5Config, AccountConfig
 
 logger = logging.getLogger(__name__)
 
-# MT5 timeframe mapping
-MT5_TIMEFRAMES: Dict[str, int] = {}
-
 try:
     import MetaTrader5 as mt5
-    MT5_TIMEFRAMES = {
+    _HAS_MT5 = True
+except ImportError:
+    mt5 = None
+    _HAS_MT5 = False
+    logger.warning("MetaTrader5 package not installed — running in dry-run mode")
+
+# MT5 timeframe constants
+_TIMEFRAME_MAP = {}
+if _HAS_MT5:
+    _TIMEFRAME_MAP = {
         "M1": mt5.TIMEFRAME_M1,
         "M5": mt5.TIMEFRAME_M5,
         "M15": mt5.TIMEFRAME_M15,
@@ -26,15 +32,17 @@ try:
         "H4": mt5.TIMEFRAME_H4,
         "D1": mt5.TIMEFRAME_D1,
     }
-except ImportError:
-    mt5 = None
-    logger.warning("MetaTrader5 package not installed — running in dry-run mode")
+else:
+    _TIMEFRAME_MAP = {
+        "M1": 1, "M5": 5, "M15": 15,
+        "H1": 16385, "H4": 16388, "D1": 16408,
+    }
 
 
 class MT5Client:
     """
     MetaTrader 5 client for Exness broker.
-    Handles connection, data retrieval, and order management.
+    Uses native MetaTrader5 package (Windows only).
     """
 
     def __init__(self, config: MT5Config, account_config: AccountConfig):
@@ -46,13 +54,21 @@ class MT5Client:
     # ==================== Connection ====================
 
     def connect(self) -> bool:
-        """Initialize MT5 connection with Exness credentials."""
-        if mt5 is None:
+        """Initialize MT5 connection via native MetaTrader5 package."""
+        if not _HAS_MT5:
             logger.error("MetaTrader5 package not available")
             return False
 
-        if not mt5.initialize():
-            logger.error(f"MT5 initialize failed: {mt5.last_error()}")
+        init_kwargs = {}
+        terminal_path = getattr(self.config, 'terminal_path', None)
+        if terminal_path:
+            init_kwargs['path'] = terminal_path
+        if self.config.portable:
+            init_kwargs['portable'] = True
+
+        if not mt5.initialize(**init_kwargs):
+            err = mt5.last_error()
+            logger.error(f"MT5 initialize failed: {err}")
             return False
 
         authorized = mt5.login(
@@ -63,7 +79,8 @@ class MT5Client:
         )
 
         if not authorized:
-            logger.error(f"MT5 login failed: {mt5.last_error()}")
+            err = mt5.last_error()
+            logger.error(f"MT5 login failed: {err}")
             mt5.shutdown()
             return False
 
@@ -85,17 +102,21 @@ class MT5Client:
 
     def disconnect(self) -> None:
         """Shutdown MT5 connection."""
-        if mt5 is not None and self._connected:
-            mt5.shutdown()
+        if self._connected:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
             self._connected = False
             logger.info("MT5 disconnected")
 
     def is_connected(self) -> bool:
         """Check if MT5 terminal is connected."""
-        if mt5 is None:
+        try:
+            info = mt5.terminal_info()
+            return info is not None and info.connected
+        except Exception:
             return False
-        info = mt5.terminal_info()
-        return info is not None and info.connected
 
     def reconnect(self) -> bool:
         """Reconnect if connection was lost."""
@@ -132,7 +153,7 @@ class MT5Client:
         if not self._ensure_connected():
             return []
 
-        tf = MT5_TIMEFRAMES.get(timeframe)
+        tf = _TIMEFRAME_MAP.get(timeframe)
         if tf is None:
             logger.error(f"Unknown timeframe: {timeframe}")
             return []
@@ -536,9 +557,6 @@ class MT5Client:
 
     def _get_filling_type(self, symbol: str) -> int:
         """Get the appropriate fill type for a symbol."""
-        if mt5 is None:
-            return 0
-
         fill_map = {
             "IOC": mt5.ORDER_FILLING_IOC,
             "FOK": mt5.ORDER_FILLING_FOK,

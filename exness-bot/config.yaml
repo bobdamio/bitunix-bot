@@ -1,0 +1,145 @@
+# Exness Bot - Configuration
+# Strategy: FVG/IFVG + Supply/Demand Zones + Multi-Timeframe Analysis
+# Platform: Exness MT5
+
+# MT5 Credentials (all from .env)
+mt5:
+  server: "${MT5_SERVER}"
+  login: "${MT5_LOGIN}"
+  password: "${MT5_PASSWORD}"
+  timeout: 30000                     # Connection timeout (ms)
+  portable: false                    # Use portable MT5 terminal
+  terminal_path: ""                  # Leave empty for auto-detect, or set full path
+
+# Trading Symbols
+symbols:
+  - XAUUSD       # Gold
+  - USOIL        # US Oil (WTI Crude)
+
+# Account Settings
+account:
+  hedge_mode: true                   # Exness hedging account
+  magic_number: 202603              # Unique magic number for bot orders
+  deviation: 20                      # Max price deviation (points)
+  fill_type: "IOC"                   # IOC / FOK / RETURN
+
+# FVG Entry Settings — adapted from GoldasT
+fvg:
+  entry_zone_min: 0.25               # 25% fill — deeper zone entry = better R:R
+  entry_zone_max: 0.85               # 85% max fill
+  min_strength: 0.55                 # Min FVG strength for entry
+  min_gap_percent: 0.0005            # 0.05% min gap (forex spreads are tighter)
+  min_gap_atr_mult: 0.3              # Gap must be ≥ 0.3×ATR
+  max_active_fvgs: 3                 # Max FVGs tracked per symbol
+  lookback_candles: 50               # Candles to scan for FVGs
+  min_volume_ratio: 0.5              # Volume filter (forex volume is tick-based)
+  edge_entry_tolerance: 0.0010       # 0.10% zone-edge anticipation
+  min_candle_age: 1                  # Wait 1 closed candle
+  allowed_direction: "BOTH"          # BOTH / LONG / SHORT
+  max_zone_distance: 0.030           # 3.0% max zone distance from price
+  max_entry_distance: 0.015          # 1.5% max entry distance
+  ifvg_threshold_pct: 0.5            # IFVG violation threshold %
+  impulse_body_ratio: 0.5            # Impulse candle body/range ratio
+
+# Supply/Demand Zone Settings
+supply_demand:
+  enabled: true
+  lookback_candles: 100              # Candles to look back for zones
+  min_zone_strength: 0.5             # Minimum strength for valid zone
+  min_impulse_atr_mult: 1.5          # Impulse move must be ≥ 1.5x ATR
+  max_base_candles: 5                # Max candles in consolidation base
+  min_base_candles: 2                # Min candles in consolidation base
+  zone_touch_invalidation: 3         # Zone invalidated after N touches
+  max_zones_per_side: 5              # Max supply/demand zones tracked
+  fresh_zone_bonus: 0.20             # Bonus strength for untouched zones
+
+# Multi-Timeframe Analysis
+mtf:
+  enabled: true
+  htf_timeframe: "M15"              # Higher timeframe (15 min)
+  mtf_timeframe: "M5"               # Medium timeframe (5 min)
+  ltf_timeframe: "M1"               # Lower timeframe (1 min entry)
+  htf_weight: 0.50                   # Weight for 15m analysis
+  mtf_weight: 0.30                   # Weight for 5m analysis
+  ltf_weight: 0.20                   # Weight for 1m analysis
+  require_htf_alignment: true        # Require 15m zone alignment
+  min_confluence_score: 0.60         # Min combined confluence score
+
+# Pending Order Settings (Buy Stop / Sell Stop)
+pending_orders:
+  enabled: true
+  buy_stop_offset_atr: 0.3           # Buy Stop placed ATR*0.3 above resistance
+  sell_stop_offset_atr: 0.3          # Sell Stop placed ATR*0.3 below support
+  expiration_candles: 10             # Cancel pending after N candles
+  max_pending_per_symbol: 2          # Max pending orders per symbol
+
+# Trend Filter
+trend:
+  ema_fast: 8
+  ema_slow: 21
+  entry_threshold: 0.20              # Min trend score for entry
+  atr_period: 14
+  # BOS (Break of Structure)
+  bos_enabled: true
+  bos_soft_mode: true
+  bos_max_age_candles: 15
+  bos_min_hold_candles: 3
+
+# TP/SL Settings
+tpsl:
+  sl_buffer_atr_mult: 0.15           # SL buffer beyond zone edge
+  sl_min_atr_mult: 0.5               # Min SL = 0.5x ATR
+  sl_max_atr_mult: 2.0               # Max SL = 2.0x ATR
+  default_rr: 2.0                    # Default risk:reward ratio
+  min_rr: 1.0                        # Minimum R:R (for 1:1 targets)
+  max_rr: 3.0                        # Maximum R:R
+  tp_min_atr_mult: 1.0               # TP floor = 1x ATR
+  # Trailing SL
+  trailing_enabled: true
+  trailing_breakeven_at_r: 1.0       # Move SL to BE at 1R
+  trailing_be_lock_r: 0.3            # BE SL = entry + 0.3R
+  trailing_runner_at_r: 2.0          # Activate runner at 2R
+  trailing_runner_sl_distance_r: 1.5 # Runner SL trail distance
+  trailing_step_r: 0.20              # Min SL move to trigger modification
+
+# Position Sizing
+position:
+  risk_percent: 0.02                 # Risk 2% per trade
+  min_lot: 0.01                      # Min lot size
+  max_lot: 1.0                       # Max lot size
+  max_positions: 3                   # Max simultaneous positions
+  max_positions_per_symbol: 2        # Max positions per symbol (hedging)
+
+# Cooldowns
+cooldowns:
+  entry_cooldown_seconds: 120        # Min time between entries
+  loss_cooldown_seconds: 300         # 5 min cooldown after loss
+  zone_cooldown_seconds: 3600        # 1h — zone cooldown after SL
+
+# Session Settings (ICT Killzones)
+session:
+  enabled: true
+  killzones:
+    - name: "London"
+      start_hour: 7
+      end_hour: 10
+    - name: "NY"
+      start_hour: 12
+      end_hour: 16
+    - name: "Late_NY"
+      start_hour: 20
+      end_hour: 23
+  weekdays_only: true
+
+# Telegram Notifications
+telegram:
+  enabled: false
+  bot_token: ""
+  allowed_users: []
+
+# Logging
+logging:
+  level: "INFO"
+  file: "logs/exness_bot.log"
+  max_size_mb: 10
+  backup_count: 5

@@ -130,6 +130,13 @@ def setup_logging(config: Config) -> None:
 
 def main(config_path: str = "config.yaml") -> None:
     """Main entry point."""
+    # Load .env file if present
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
     # Load config
     config = load_config(config_path)
 

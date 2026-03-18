@@ -21,6 +21,7 @@ class MT5Config:
     password: str = ""
     timeout: int = 30000
     portable: bool = False
+    terminal_path: str = ""
 
 
 @dataclass
