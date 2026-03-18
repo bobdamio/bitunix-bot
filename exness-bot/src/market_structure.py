@@ -50,16 +50,22 @@ class MarketStructure:
         self._candles_since_bos_change: int = 9999
         self._prev_bos_direction: TrendDirection = TrendDirection.NEUTRAL
         self._total_candles_seen: int = 0
+        self._warmed_up: bool = False
 
         self.range_high: float = 0.0
         self.range_low: float = 0.0
 
     def warmup(self, candles: List[Candle]) -> None:
-        """Warm up BOS state from historical candles."""
+        """Warm up BOS state from historical candles. Only runs once."""
+        if self._warmed_up:
+            # Already warmed up — just do incremental update
+            self.update(candles)
+            return
         if len(candles) < 5:
             return
         for end in range(5, len(candles) + 1):
             self.update(candles[:end])
+        self._warmed_up = True
         logger.info(
             f"{self.symbol} [{self.timeframe}] BOS warmup: {len(candles)} candles -> "
             f"highs={len(self.swing_highs)} lows={len(self.swing_lows)} "
