@@ -70,23 +70,42 @@ class StrategyEngine:
         self.state.is_running = True
         self.state.start_time = datetime.now()
 
-        # Initialize symbol states
+        # Initialize symbol states (try suffixes if exact name not found)
+        resolved_symbols = []
         for symbol in self.config.symbols:
-            sym_info = self.mt5.get_symbol_info(symbol)
-            if sym_info is None:
-                logger.error(f"Cannot access symbol: {symbol}")
+            resolved = self._resolve_symbol(symbol)
+            if resolved is None:
+                logger.error(f"Cannot access symbol: {symbol} (tried suffixes: m, c, e, .raw)")
                 continue
-            self.state.symbols[symbol] = SymbolState(symbol=symbol)
-            logger.info(f"✅ Symbol initialized: {symbol} | digits={sym_info['digits']} | spread={sym_info['spread']}")
+            sym_info = self.mt5.get_symbol_info(resolved)
+            self.state.symbols[resolved] = SymbolState(symbol=resolved)
+            resolved_symbols.append(resolved)
+            if resolved != symbol:
+                logger.info(f"Symbol mapped: {symbol} -> {resolved} | digits={sym_info['digits']} | spread={sym_info['spread']}")
+            else:
+                logger.info(f"Symbol ready: {symbol} | digits={sym_info['digits']} | spread={sym_info['spread']}")
+        self.config.symbols = resolved_symbols
 
         # Sync existing positions
         self._sync_positions()
 
         logger.info(
-            f"🚀 Strategy initialized: {len(self.state.symbols)} symbols | "
+            f"Strategy initialized: {len(self.state.symbols)} symbols | "
             f"Balance: ${self.state.balance:.2f} | Equity: ${self.state.equity:.2f}"
         )
         return True
+
+    def _resolve_symbol(self, symbol: str) -> Optional[str]:
+        """Try to find symbol with broker-specific suffix (e.g. XAUUSDm, XAUUSDc)."""
+        # Try exact name first
+        if self.mt5.get_symbol_info(symbol) is not None:
+            return symbol
+        # Try common Exness suffixes
+        for suffix in ["m", "c", "e", ".raw", "pro", "#"]:
+            candidate = symbol + suffix
+            if self.mt5.get_symbol_info(candidate) is not None:
+                return candidate
+        return None
 
     def run_cycle(self) -> None:
         """Run one analysis + trading cycle for all symbols."""
@@ -214,7 +233,7 @@ class StrategyEngine:
         # Validate R:R
         if tpsl.risk_reward_ratio < self.config.tpsl.min_rr:
             logger.info(
-                f"❌ {symbol}: R:R too low ({tpsl.risk_reward_ratio:.2f} < {self.config.tpsl.min_rr})"
+                f"{symbol}: R:R too low ({tpsl.risk_reward_ratio:.2f} < {self.config.tpsl.min_rr})"
             )
             return
 
@@ -232,7 +251,7 @@ class StrategyEngine:
         )
 
         logger.info(
-            f"🎯 Signal: {symbol} {direction.value} | "
+            f">> Signal: {symbol} {direction.value} | "
             f"lot={lot_size} | SL={fmt_price(tpsl.sl_price)} | "
             f"TP={fmt_price(tpsl.tp_price)} | R:R={tpsl.risk_reward_ratio:.1f} | "
             f"confluence={confluence_score:.2f} | type={order_type}"
@@ -265,7 +284,7 @@ class StrategyEngine:
             return
 
         if ticket is None:
-            logger.error(f"❌ {symbol}: Order execution failed")
+            logger.error(f"{symbol}: Order execution failed")
             return
 
         # Track position
@@ -291,7 +310,7 @@ class StrategyEngine:
         self._last_entry_time[symbol] = datetime.now()
 
         logger.info(
-            f"✅ Trade opened: {symbol} {direction.value} | "
+            f"Trade opened: {symbol} {direction.value} | "
             f"ticket={ticket} lot={lot_size} @ {fmt_price(current_price)}"
         )
 
@@ -350,14 +369,14 @@ class StrategyEngine:
                     pos.sl_price = new_sl
                     pos.trailing_sl_price = new_sl
                     pos.trailing_state = "breakeven"
-                    logger.info(f"🔒 BE activated: {symbol} ticket={pos.ticket} SL→{fmt_price(new_sl)}")
+                    logger.info(f"BE activated: {symbol} ticket={pos.ticket} SL->{fmt_price(new_sl)}")
 
             elif pos.direction == TradeDirection.SHORT and new_sl < pos.sl_price:
                 if self.mt5.modify_position(pos.ticket, symbol, new_sl, pos.tp_price):
                     pos.sl_price = new_sl
                     pos.trailing_sl_price = new_sl
                     pos.trailing_state = "breakeven"
-                    logger.info(f"🔒 BE activated: {symbol} ticket={pos.ticket} SL→{fmt_price(new_sl)}")
+                    logger.info(f"BE activated: {symbol} ticket={pos.ticket} SL->{fmt_price(new_sl)}")
 
         # Phase 3: Runner at 2R
         runner_at = self.config.tpsl.trailing_runner_at_r
@@ -373,7 +392,7 @@ class StrategyEngine:
                     if self.mt5.modify_position(pos.ticket, symbol, new_sl, pos.tp_price):
                         pos.sl_price = new_sl
                         pos.trailing_sl_price = new_sl
-                        logger.info(f"📈 Trail: {symbol} ticket={pos.ticket} SL→{fmt_price(new_sl)} ({current_r:.1f}R)")
+                        logger.info(f"Trail UP: {symbol} ticket={pos.ticket} SL->{fmt_price(new_sl)} ({current_r:.1f}R)")
 
             else:
                 new_sl = current_price + sl_distance * runner_trail
@@ -381,7 +400,7 @@ class StrategyEngine:
                     if self.mt5.modify_position(pos.ticket, symbol, new_sl, pos.tp_price):
                         pos.sl_price = new_sl
                         pos.trailing_sl_price = new_sl
-                        logger.info(f"📉 Trail: {symbol} ticket={pos.ticket} SL→{fmt_price(new_sl)} ({current_r:.1f}R)")
+                        logger.info(f"Trail DN: {symbol} ticket={pos.ticket} SL->{fmt_price(new_sl)} ({current_r:.1f}R)")
 
     def _sync_positions(self) -> None:
         """Sync open positions from MT5 on startup."""
@@ -409,7 +428,7 @@ class StrategyEngine:
                 sym_state.positions.append(pos)
 
             if mt5_positions:
-                logger.info(f"🔄 Synced {len(mt5_positions)} positions for {symbol}")
+                logger.info(f"Synced {len(mt5_positions)} positions for {symbol}")
 
     def _check_cooldowns(self, symbol: str) -> bool:
         """Check if symbol is in cooldown."""
@@ -470,7 +489,7 @@ class StrategyEngine:
             closed = [p for p in sym_state.positions if p.ticket not in mt5_tickets]
             for pos in closed:
                 logger.info(
-                    f"🔒 Position closed: {symbol} {pos.direction.value} "
+                    f"Position closed: {symbol} {pos.direction.value} "
                     f"ticket={pos.ticket}"
                 )
                 # If it was a loss, record cooldown

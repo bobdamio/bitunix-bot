@@ -92,7 +92,7 @@ class MT5Client:
 
         self._connected = True
         logger.info(
-            f"✅ MT5 connected: {account_info.server} | "
+            f"[OK] MT5 connected: {account_info.server} | "
             f"Account #{account_info.login} | "
             f"Balance: ${account_info.balance:.2f} | "
             f"Leverage: 1:{account_info.leverage} | "
@@ -279,13 +279,13 @@ class MT5Client:
 
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error(
-                f"❌ Order failed: {symbol} {direction.value} {lot_size} lots | "
+                f"[FAIL] Order failed: {symbol} {direction.value} {lot_size} lots | "
                 f"retcode={result.retcode} comment={result.comment}"
             )
             return None
 
         logger.info(
-            f"✅ Order filled: {symbol} {direction.value} {lot_size} lots @ {result.price} | "
+            f"[OK] Order filled: {symbol} {direction.value} {lot_size} lots @ {result.price} | "
             f"ticket={result.order} SL={sl_price} TP={tp_price}"
         )
         return result.order
@@ -355,7 +355,7 @@ class MT5Client:
 
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error(
-                f"❌ Pending order failed: {symbol} {order_type} {lot_size} @ {price} | "
+                f"[FAIL] Pending order failed: {symbol} {order_type} {lot_size} @ {price} | "
                 f"retcode={result.retcode} comment={result.comment}"
             )
             return None
@@ -394,10 +394,10 @@ class MT5Client:
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             err = result.comment if result else str(mt5.last_error())
-            logger.error(f"❌ Modify failed ticket={ticket}: {err}")
+            logger.error(f"Modify failed ticket={ticket}: {err}")
             return False
 
-        logger.info(f"✏️ Modified ticket={ticket}: SL={sl_price} TP={tp_price}")
+        logger.info(f"Modified ticket={ticket}: SL={sl_price} TP={tp_price}")
         return True
 
     def close_position(self, ticket: int, symbol: str, lot_size: float, direction: TradeDirection) -> bool:
@@ -435,10 +435,10 @@ class MT5Client:
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             err = result.comment if result else str(mt5.last_error())
-            logger.error(f"❌ Close failed ticket={ticket}: {err}")
+            logger.error(f"Close failed ticket={ticket}: {err}")
             return False
 
-        logger.info(f"🔒 Position closed: ticket={ticket} {symbol} {lot_size} lots @ {result.price}")
+        logger.info(f"Position closed: ticket={ticket} {symbol} {lot_size} lots @ {result.price}")
         return True
 
     def cancel_pending_order(self, ticket: int) -> bool:
@@ -454,10 +454,10 @@ class MT5Client:
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             err = result.comment if result else str(mt5.last_error())
-            logger.error(f"❌ Cancel pending failed ticket={ticket}: {err}")
+            logger.error(f"Cancel pending failed ticket={ticket}: {err}")
             return False
 
-        logger.info(f"🗑️ Pending order cancelled: ticket={ticket}")
+        logger.info(f"Pending order cancelled: ticket={ticket}")
         return True
 
     def get_open_positions(self, symbol: Optional[str] = None) -> List[dict]:

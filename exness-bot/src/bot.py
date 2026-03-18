@@ -37,10 +37,10 @@ class ExnessBot:
     def start(self) -> None:
         """Start the bot."""
         logger.info("=" * 60)
-        logger.info("🤖 Exness Bot v1.0 Starting...")
+        logger.info("Exness Bot v1.0 Starting...")
         logger.info(f"   Symbols: {', '.join(self.config.symbols)}")
         logger.info(f"   Server: {self.config.mt5.server}")
-        logger.info(f"   MTF: {self.config.mtf.htf_timeframe} → {self.config.mtf.mtf_timeframe} → {self.config.mtf.ltf_timeframe}")
+        logger.info(f"   MTF: {self.config.mtf.htf_timeframe} > {self.config.mtf.mtf_timeframe} > {self.config.mtf.ltf_timeframe}")
         logger.info(f"   Risk: {self.config.position.risk_percent*100:.1f}%")
         logger.info("=" * 60)
 
@@ -53,7 +53,7 @@ class ExnessBot:
 
     def stop(self) -> None:
         """Stop the bot gracefully."""
-        logger.info("🛑 Stopping bot...")
+        logger.info("Stopping bot...")
         self._running = False
         self.mt5_client.disconnect()
         logger.info("Bot stopped")

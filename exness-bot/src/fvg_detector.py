@@ -80,7 +80,7 @@ class FVGDetector:
             )
             fvg.strength = self._calculate_strength(fvg, c2, candles)
             logger.info(
-                f"📈 Bullish FVG [{timeframe}]: {symbol} "
+                f"Bullish FVG [{timeframe}]: {symbol} "
                 f"zone=[{fmt_price(fvg.bottom)} - {fmt_price(fvg.top)}] "
                 f"gap={gap_percent*100:.3f}% strength={fvg.strength:.2f}"
             )
@@ -103,7 +103,7 @@ class FVGDetector:
             )
             fvg.strength = self._calculate_strength(fvg, c2, candles)
             logger.info(
-                f"📉 Bearish FVG [{timeframe}]: {symbol} "
+                f"Bearish FVG [{timeframe}]: {symbol} "
                 f"zone=[{fmt_price(fvg.bottom)} - {fmt_price(fvg.top)}] "
                 f"gap={gap_percent*100:.3f}% strength={fvg.strength:.2f}"
             )

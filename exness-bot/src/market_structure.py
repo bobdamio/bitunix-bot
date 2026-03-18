@@ -61,7 +61,7 @@ class MarketStructure:
         for end in range(5, len(candles) + 1):
             self.update(candles[:end])
         logger.info(
-            f"🏗️ {self.symbol} [{self.timeframe}] BOS warmup: {len(candles)} candles → "
+            f"{self.symbol} [{self.timeframe}] BOS warmup: {len(candles)} candles -> "
             f"highs={len(self.swing_highs)} lows={len(self.swing_lows)} "
             f"{self.get_bos_info()}"
         )

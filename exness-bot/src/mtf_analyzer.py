@@ -200,7 +200,7 @@ class MTFAnalyzer:
 
         if best_setup:
             logger.info(
-                f"🎯 MTF Setup [{symbol}]: {best_setup['direction'].value} | "
+                f">> MTF Setup [{symbol}]: {best_setup['direction'].value} | "
                 f"confluence={best_setup['confluence_score']:.2f} | "
                 f"zone={fmt_price(best_setup['zone'].bottom)}-{fmt_price(best_setup['zone'].top)} | "
                 f"order={best_setup['order_type']}"
