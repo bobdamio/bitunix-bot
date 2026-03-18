@@ -51,6 +51,57 @@ class MTFAnalyzer:
         self._structures: Dict[str, Dict[str, MarketStructure]] = {}
         self._last_diag: Dict[str, str] = {}  # suppress repeated diagnostic logs
 
+    def _is_fvg_enterable(self, fvg: FVG, current_price: float) -> bool:
+        """
+        Read-only check if price is in FVG entry zone.
+        Does NOT mutate FVG state (unlike check_entry_conditions).
+        """
+        if fvg.entry_triggered or fvg.is_violated:
+            return False
+
+        fvg_range = fvg.top - fvg.bottom
+        if fvg_range <= 0:
+            return False
+
+        # Calculate fill percent without mutating
+        if fvg.direction == TradeDirection.LONG:
+            if current_price >= fvg.top:
+                fill = 0.0
+            elif current_price <= fvg.bottom:
+                fill = 1.0
+            else:
+                fill = (fvg.top - current_price) / fvg_range
+        else:  # SHORT
+            if current_price <= fvg.bottom:
+                fill = 0.0
+            elif current_price >= fvg.top:
+                fill = 1.0
+            else:
+                fill = (current_price - fvg.bottom) / fvg_range
+
+        # Zone-edge anticipation
+        edge_tolerance = self.fvg_detector.config.edge_entry_tolerance
+        if fill == 0.0:
+            if fvg.direction == TradeDirection.LONG and current_price < fvg.bottom:
+                dist = (fvg.bottom - current_price) / fvg.bottom
+                if 0 < dist <= edge_tolerance:
+                    return True
+            elif fvg.direction == TradeDirection.SHORT and current_price > fvg.top:
+                dist = (current_price - fvg.top) / fvg.top
+                if 0 < dist <= edge_tolerance:
+                    return True
+
+        # Standard fill zone
+        cfg = self.fvg_detector.config
+        if cfg.entry_zone_min <= fill <= cfg.entry_zone_max:
+            return True
+
+        # IFVG
+        if fill >= (1.0 - cfg.ifvg_threshold_pct / 100):
+            return True
+
+        return False
+
     def _get_structure(self, symbol: str, timeframe: str) -> MarketStructure:
         """Get or create MarketStructure for symbol/timeframe."""
         if symbol not in self._structures:
@@ -187,7 +238,8 @@ class MTFAnalyzer:
                 if score >= self.config.min_confluence_score:
                     confluence_passed += 1
                     # Pre-check: is this FVG actually enterable right now?
-                    can_enter, _ = self.fvg_detector.check_entry_conditions(fvg, current_price)
+                    # Use read-only check to avoid mutating FVG state
+                    can_enter = self._is_fvg_enterable(fvg, current_price)
                     if not can_enter:
                         continue
                     support, resistance = htf_ms.get_support_resistance()
@@ -229,7 +281,8 @@ class MTFAnalyzer:
                 if score >= self.config.min_confluence_score:
                     confluence_passed += 1
                     # Pre-check: is this FVG actually enterable right now?
-                    can_enter, _ = self.fvg_detector.check_entry_conditions(fvg, current_price)
+                    # Use read-only check to avoid mutating FVG state
+                    can_enter = self._is_fvg_enterable(fvg, current_price)
                     if not can_enter:
                         continue
                     support, resistance = htf_ms.get_support_resistance()

@@ -55,6 +55,8 @@ class StrategyEngine:
         self._last_loss_time: Dict[str, datetime] = {}
         self._spent_zones: Dict[str, list] = {}
         self._blocked_entry_log: Dict[str, datetime] = {}  # suppress repeated log spam
+        self._cycle_count: int = 0
+        self._last_heartbeat: float = 0.0
 
     def initialize(self) -> bool:
         """Initialize strategy: connect to MT5, setup symbols."""
@@ -110,6 +112,20 @@ class StrategyEngine:
 
     def run_cycle(self) -> None:
         """Run one analysis + trading cycle for all symbols."""
+        self._cycle_count += 1
+
+        # Heartbeat: log every ~60 seconds (12 cycles at 5s interval)
+        now = time.time()
+        if now - self._last_heartbeat >= 60:
+            self._last_heartbeat = now
+            pos_count = self.state.get_open_positions_count()
+            pending_count = sum(len(s.pending_orders) for s in self.state.symbols.values())
+            logger.info(
+                f"[heartbeat] cycle={self._cycle_count} | "
+                f"balance=${self.state.balance:.2f} | "
+                f"positions={pos_count} | pending={pending_count}"
+            )
+
         # Update account info
         account = self.mt5.get_account_info()
         if account:
