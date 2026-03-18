@@ -5,6 +5,7 @@
 Strategy: **FVG/IFVG + Supply/Demand Zones + Multi-Timeframe Analysis (15m→5m→1m)**
 Instruments: **XAUUSD** (Gold), **USOIL** (WTI Crude Oil)
 Account type: **Hedging**
+Platform: **Windows** (VPS or local)
 
 ---
 
@@ -13,10 +14,10 @@ Account type: **Hedging**
 - [Strategy Overview](#strategy-overview)
 - [How It Works](#how-it-works)
 - [Architecture](#architecture)
-- [Server Requirements](#server-requirements)
-- [Quick Start](#quick-start)
-- [Deployment Options](#deployment-options)
+- [Requirements](#requirements)
+- [Quick Start (Windows VPS)](#quick-start-windows-vps)
 - [Configuration Reference](#configuration-reference)
+- [Auto-Start on Reboot](#auto-start-on-reboot)
 - [Monitoring & Logs](#monitoring--logs)
 - [FAQ & Troubleshooting](#faq--troubleshooting)
 
@@ -25,8 +26,6 @@ Account type: **Hedging**
 ## Strategy Overview
 
 ### Multi-Timeframe Analysis (15m → 5m → 1m)
-
-The bot analyzes three timeframes simultaneously to find high-probability trade setups:
 
 | Timeframe | Role | What it does |
 |-----------|------|-------------|
@@ -70,24 +69,22 @@ IFVG (Inverse):        Price partially violates FVG   → reversal entry
 
 ### Entry Logic
 
-The bot enters when **FVG/IFVG appears inside a fresh Supply/Demand zone**:
-
 ```
 1.  15m Supply zone detected → bearish bias
 2.  5m or 1m FVG (bearish) overlaps with that supply zone
 3.  Price fills 25-85% of the FVG → optimal entry zone
 4.  Confluence score ≥ 0.60 → SELL with SL above supply zone
-
-Same logic reversed for demand + bullish FVG → BUY
 ```
+
+Same logic reversed for demand + bullish FVG → BUY.
 
 ### Entry Types
 
 | Type | When | How |
 |------|------|-----|
 | **Market** | FVG + Zone confluence confirmed, price in entry zone | Direct market execution |
-| **Buy Stop** | Price consolidating just below resistance | Placed ATR×0.3 above resistance breakout level |
-| **Sell Stop** | Price consolidating just above support | Placed ATR×0.3 below support breakdown level |
+| **Buy Stop** | Price consolidating just below resistance | Placed ATR×0.3 above resistance |
+| **Sell Stop** | Price consolidating just above support | Placed ATR×0.3 below support |
 
 ### Risk Management
 
@@ -142,419 +139,239 @@ Every 5 seconds:
 
 ```
 exness-bot/
-├── main.py                    # Entry point (argparse → bot.main())
-├── config.yaml                # All settings (MT5, strategy, risk)
-├── config.yaml.example        # Template config
-├── .env.example               # Environment vars template
-├── requirements.txt           # Python dependencies
-├── Dockerfile                 # Docker image (Wine + Xvfb + MT5)
-├── docker-compose.yml         # Docker orchestration
+├── main.py                     # Entry point
+├── config.yaml                 # All settings
+├── .env                        # MT5 credentials (not in git)
+├── requirements.txt            # Python dependencies
 │
 ├── src/
-│   ├── __init__.py            # Package init, fmt_price()
-│   ├── models.py              # Data models: Candle, FVG, Zone, Position, etc.
-│   ├── config.py              # YAML config loader with env var resolution
-│   │
-│   ├── mt5_client.py          # MT5 API: connect, orders, positions, candles
-│   │   └── connect/login/reconnect
-│   │   └── place_market_order / place_pending_order
-│   │   └── modify_position / close_position
-│   │   └── get_candles / get_current_price
-│   │
-│   ├── fvg_detector.py        # FVG/IFVG detection (from GoldasT Bot)
-│   │   └── detect_fvg() — last 3 candles
-│   │   └── detect_fvg_sliding_window() — full buffer scan
-│   │   └── check_entry_conditions() — fill zone / edge anticipation
-│   │   └── _calculate_strength() — gap + volume + trend + impulse
-│   │
-│   ├── supply_demand.py       # Supply/Demand zone detector
-│   │   └── detect_zones() → (supply_zones, demand_zones)
-│   │   └── find_fvg_in_zone() — FVG↔Zone overlap check
-│   │   └── _find_base() — consolidation detection
-│   │   └── _calculate_zone_strength() — impulse + base + freshness
-│   │
-│   ├── market_structure.py    # BOS / Swing High/Low / Premium-Discount
-│   │   └── warmup() / update()
-│   │   └── is_bos_aligned() / is_bos_stable()
-│   │   └── get_support_resistance()
-│   │
-│   ├── mtf_analyzer.py        # Multi-Timeframe Analyzer (15m→5m→1m)
-│   │   └── analyze() — full MTF pipeline
-│   │   └── _calculate_confluence_score()
-│   │   └── _check_pending_order_setup() — Buy/Sell Stop
-│   │
-│   ├── tpsl_calculator.py     # TP/SL with ATR + zone anchoring
-│   │   └── calculate() → TPSLLevels
-│   │   └── calculate_atr()
-│   │
-│   ├── position_sizer.py      # Lot size calculator (risk-based)
-│   │   └── calculate_lot_size()
-│   │
-│   ├── strategy_engine.py     # Main orchestrator
-│   │   └── initialize() — connect, sync positions
-│   │   └── run_cycle() — main loop iteration
-│   │   └── _process_symbol() — analyze + trade
-│   │   └── _manage_positions() — trailing SL
-│   │   └── _update_trailing() — 3-phase trailing
-│   │
-│   └── bot.py                 # Bot lifecycle: logging, main loop, shutdown
-│       └── ExnessBot.start() / stop()
-│       └── setup_logging()
-│       └── main()
+│   ├── bot.py                  # Bot lifecycle: start/stop/loop
+│   ├── config.py               # YAML config loader
+│   ├── models.py               # Data models: Candle, FVG, Zone, etc.
+│   ├── mt5_client.py           # MetaTrader5 API client
+│   ├── strategy_engine.py      # Main orchestrator
+│   ├── fvg_detector.py         # FVG/IFVG detection
+│   ├── supply_demand.py        # Supply/Demand zone detector
+│   ├── mtf_analyzer.py         # Multi-Timeframe analyzer
+│   ├── market_structure.py     # BOS / Swing detection
+│   ├── tpsl_calculator.py      # TP/SL calculator
+│   └── position_sizer.py       # Lot size calculator
 │
 ├── scripts/
-│   ├── setup.sh               # Full server setup (deps + venv + systemd)
-│   ├── start.sh               # Start with Xvfb
-│   └── status.sh              # Check bot status + recent logs
+│   ├── install_windows.bat     # Setup script
+│   └── run_bot.bat             # Run script
 │
-├── data/                      # Persistent data (trade history, etc.)
-├── logs/                      # Log files (rotated, 10MB × 5 backups)
-└── tests/                     # Unit tests
+├── data/                       # Persistent data
+└── logs/                       # Log files
 ```
 
 ---
 
-## Server Requirements
+## Requirements
 
-| Requirement | Minimum | This VPS |
-|-------------|---------|----------|
-| OS | Ubuntu 22.04+ | Ubuntu 24.04 ✅ |
-| Python | 3.10+ | 3.12.3 ✅ |
-| RAM | 512MB | 8GB ✅ |
-| Disk | 1GB free | 93GB free ✅ |
-| Docker | 20.0+ (if Docker deploy) | 29.2.1 ✅ |
-| Network | Stable internet | VPS ✅ |
-
-**Note:** MetaTrader5 Python package requires Wine on Linux (it wraps a Windows DLL). The `Xvfb` virtual display provides the headless X11 session MT5 needs.
+- **Windows** 10/11 or Windows Server 2019+
+- **Python** 3.10 – 3.12 (3.13 is not supported by the MetaTrader5 package)
+- **MetaTrader 5** from Exness (installed and logged in at least once)
+- **RAM:** 1GB+
+- **Internet:** stable connection
 
 ---
 
-## Quick Start
+## Quick Start (Windows VPS)
 
-### Option A: Direct (venv)
+### Step 1: Connect to your Windows VPS
 
-```bash
-cd /home/goldast/projects/bitunix-bot/exness-bot
+Use RDP (Remote Desktop):
+```
+mstsc /v:YOUR_VPS_IP
+```
+Or use the built-in "Remote Desktop Connection" on Windows.
 
-# Run automated setup
-bash scripts/setup.sh
+### Step 2: Install Python 3.12
 
-# Set your MT5 credentials
-cp .env.example .env
-# Edit .env with your server, login, password
-nano .env
-
-# Start
-bash scripts/start.sh
+1. Download from https://www.python.org/downloads/
+2. **Important:** check ✅ **"Add Python to PATH"** during installation
+3. Verify:
+```cmd
+python --version
 ```
 
-### Option B: Docker
+### Step 3: Install Git (if not present)
 
-```bash
-cd /home/goldast/projects/bitunix-bot/exness-bot
+Download from https://git-scm.com/download/win
 
-# Set credentials
-cp .env.example .env
-# Edit: MT5_SERVER, MT5_LOGIN, MT5_PASSWORD
-nano .env
+### Step 4: Install MetaTrader 5
 
-# Build and start
-docker compose up -d
+1. Go to your Exness Personal Area → your MT5 account → "Download Terminal"
+2. Install MT5
+3. **Launch the terminal and log in** at least once manually:
+   - Server: `Exness-MT5Trial15`
+   - Login: `260474980`
+   - Password: your password
+4. **Keep MT5 running** — the bot communicates with it via the native API
 
-# View logs
-docker compose logs -f
+### Step 5: Clone the repository
+
+```cmd
+cd C:\Users\Administrator
+git clone https://github.com/bobdamio/bitunix-bot.git
+cd bitunix-bot\exness-bot
 ```
 
-### Option C: Systemd (auto-start on reboot)
+### Step 6: Install dependencies
 
-```bash
-# First run setup.sh (creates the service file)
-bash scripts/setup.sh
-
-# Set credentials
-cp .env.example .env
-nano .env  # MT5_SERVER, MT5_LOGIN, MT5_PASSWORD
-
-# Enable and start
-sudo systemctl enable exness-bot
-sudo systemctl start exness-bot
-
-# Check status
-sudo systemctl status exness-bot
-
-# View logs
-journalctl -u exness-bot -f
+```cmd
+scripts\install_windows.bat
 ```
 
----
-
-## Deployment Options
-
-### 1. Docker Compose (recommended)
-
-```bash
-# Build image
-docker compose build
-
-# Start in background
-docker compose up -d
-
-# View live logs
-docker compose logs -f
-
-# Stop
-docker compose down
-
-# Restart
-docker compose restart
-
-# Rebuild after code changes
-docker compose up -d --build
+Or manually:
+```cmd
+python -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements.txt
 ```
 
-### 2. Systemd Service
+### Step 7: Configure credentials
 
-The `scripts/setup.sh` creates a systemd service at `/etc/systemd/system/exness-bot.service`.
-
-```bash
-sudo systemctl start exness-bot      # Start
-sudo systemctl stop exness-bot       # Stop
-sudo systemctl restart exness-bot    # Restart
-sudo systemctl status exness-bot     # Status
-sudo systemctl enable exness-bot     # Auto-start on boot
-journalctl -u exness-bot -f          # Live logs
+```cmd
+copy .env.example .env
+notepad .env
 ```
 
-### 3. Direct (development)
+Fill in:
+```
+MT5_SERVER=Exness-MT5Trial15
+MT5_LOGIN=260474980
+MT5_PASSWORD=your_password
+```
 
-```bash
-source venv/bin/activate
-export MT5_SERVER="Exness-MT5Trial15"
-export MT5_LOGIN="260474980"
-export MT5_PASSWORD="YOUR_PASSWORD_HERE"
+### Step 8: Start the bot
+
+```cmd
+scripts\run_bot.bat
+```
+
+Or manually:
+```cmd
+venv\Scripts\activate.bat
 python main.py
 ```
+
+Expected output:
+```
+12:00:00 [INFO] ============================================================
+12:00:00 [INFO] 🤖 Exness Bot v1.0 Starting...
+12:00:00 [INFO]    Symbols: XAUUSD, USOIL
+12:00:00 [INFO]    Server: Exness-MT5Trial15
+12:00:00 [INFO]    MTF: M15 → M5 → M1
+12:00:00 [INFO]    Risk: 2.0%
+12:00:00 [INFO] ============================================================
+12:00:01 [INFO] ✅ MT5 connected: Exness-MT5Trial15 | Account #260474980 | Balance: $10000.00
+```
+
+---
+
+## Auto-Start on Reboot
+
+To automatically restart the bot when the Windows VPS reboots:
+
+### Option 1: Task Scheduler (simple)
+
+1. Open **Task Scheduler** (`taskschd.msc`)
+2. Click **Create Task** (not "Create Basic Task")
+3. Tab **General**:
+   - Name: `ExnessBot`
+   - ✅ "Run whether user is logged on or not"
+   - ✅ "Run with highest privileges"
+4. Tab **Triggers**:
+   - New → "At startup" → Delay: 30 seconds
+5. Tab **Actions**:
+   - New → Action: "Start a program"
+   - Program: `C:\Users\Administrator\bitunix-bot\exness-bot\scripts\run_bot.bat`
+   - Start in: `C:\Users\Administrator\bitunix-bot\exness-bot`
+6. Tab **Settings**:
+   - ✅ "If the task fails, restart every 1 minute"
+   - "Attempt to restart up to 999 times"
+
+### Option 2: NSSM (as a Windows Service)
+
+```cmd
+REM Download NSSM from: https://nssm.cc/download
+nssm install ExnessBot C:\Users\Administrator\bitunix-bot\exness-bot\venv\Scripts\python.exe main.py
+nssm set ExnessBot AppDirectory C:\Users\Administrator\bitunix-bot\exness-bot
+nssm set ExnessBot AppStdout C:\Users\Administrator\bitunix-bot\exness-bot\logs\service.log
+nssm set ExnessBot AppStderr C:\Users\Administrator\bitunix-bot\exness-bot\logs\service.log
+nssm start ExnessBot
+```
+
+> **Important:** MT5 terminal must also start on boot.
+> Place a shortcut to `terminal64.exe` in the Startup folder:
+> `C:\Users\Administrator\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\`
 
 ---
 
 ## Configuration Reference
 
-### MT5 Connection (`mt5:`)
+The `config.yaml` file contains all bot settings. Key sections:
 
-| Param | Value | Description |
-|-------|-------|-------------|
-| `server` | `${MT5_SERVER}` | From .env — Exness MT5 server name |
-| `login` | `${MT5_LOGIN}` | From .env — MT5 account number |
-| `password` | `${MT5_PASSWORD}` | From .env — MT5 trading password |
-| `timeout` | `30000` | Connection timeout (ms) |
-
-### Symbols (`symbols:`)
-
-```yaml
-symbols:
-  - XAUUSD    # Gold vs USD
-  - USOIL     # WTI Crude Oil
-```
-
-### FVG Settings (`fvg:`)
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `entry_zone_min` | 0.25 | Min fill % to enter (25%) |
-| `entry_zone_max` | 0.85 | Max fill % to enter (85%) |
-| `min_strength` | 0.55 | Min FVG strength score |
-| `min_gap_percent` | 0.0005 | Min gap size (0.05%) |
-| `min_gap_atr_mult` | 0.3 | Min gap = 0.3×ATR |
-| `max_active_fvgs` | 3 | Max FVGs tracked per symbol |
-| `lookback_candles` | 50 | Candles to scan |
-| `ifvg_threshold_pct` | 0.5 | IFVG violation threshold |
-
-### Supply/Demand (`supply_demand:`)
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `enabled` | true | Enable S/D zone detection |
-| `lookback_candles` | 100 | Candles to scan for zones |
-| `min_impulse_atr_mult` | 1.5 | Impulse must be ≥ 1.5×ATR |
-| `max_base_candles` | 5 | Max consolidation candles |
-| `zone_touch_invalidation` | 3 | Zone removed after 3 touches |
-| `fresh_zone_bonus` | 0.20 | +20% strength for fresh zones |
-
-### Multi-Timeframe (`mtf:`)
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `enabled` | true | Enable MTF analysis |
-| `htf_timeframe` | M15 | Higher timeframe |
-| `mtf_timeframe` | M5 | Medium timeframe |
-| `ltf_timeframe` | M1 | Entry timeframe |
-| `htf_weight` | 0.50 | 15m weight in confluence |
-| `mtf_weight` | 0.30 | 5m weight |
-| `ltf_weight` | 0.20 | 1m weight |
-| `min_confluence_score` | 0.60 | Min score to enter |
-
-### TP/SL (`tpsl:`)
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `sl_buffer_atr_mult` | 0.15 | SL noise buffer |
-| `sl_min_atr_mult` | 0.5 | Min SL = 0.5×ATR |
-| `sl_max_atr_mult` | 2.0 | Max SL = 2.0×ATR |
-| `default_rr` | 2.0 | Default R:R ratio |
-| `min_rr` | 1.0 | Min R:R (1:1) |
-| `max_rr` | 3.0 | Max R:R (1:3) |
-| `trailing_breakeven_at_r` | 1.0 | BE at 1R |
-| `trailing_runner_at_r` | 2.0 | Runner at 2R |
-
-### Position Sizing (`position:`)
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `risk_percent` | 0.02 | 2% risk per trade |
-| `min_lot` | 0.01 | Minimum lot size |
-| `max_lot` | 1.0 | Maximum lot size |
-| `max_positions` | 3 | Max simultaneous positions |
-| `max_positions_per_symbol` | 2 | Max per symbol (hedging) |
-
-### Sessions (`session:`)
-
-| Killzone | UTC Hours | Description |
-|----------|-----------|-------------|
-| London | 07:00—10:00 | London session open |
-| NY | 12:00—16:00 | New York session |
-| Late NY | 20:00—23:00 | Late NY / Asian pre-open |
-
-### Pending Orders (`pending_orders:`)
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `enabled` | true | Enable Buy/Sell Stop orders |
-| `buy_stop_offset_atr` | 0.3 | Buy Stop = resistance + 0.3×ATR |
-| `sell_stop_offset_atr` | 0.3 | Sell Stop = support - 0.3×ATR |
-| `expiration_candles` | 10 | Cancel after 10 candles |
+| Section | What it configures |
+|---------|-------------------|
+| `mt5` | Server, login, password (from .env), terminal path |
+| `symbols` | Traded instruments (XAUUSD, USOIL, ...) |
+| `account` | Hedge mode, magic number, deviation |
+| `fvg` | FVG/IFVG detection — entry zones, strength, volume |
+| `supply_demand` | S/D zones — lookback, strength, touches |
+| `mtf` | Multi-Timeframe — timeframes, weights, threshold |
+| `pending_orders` | Buy Stop / Sell Stop — offset, expiration |
+| `tpsl` | TP/SL — ATR buffers, R:R, trailing SL |
+| `position` | Risk %, min/max lots, max positions |
+| `cooldowns` | Cooldowns between entries |
+| `session` | Killzones (London, NY, Late NY) |
+| `telegram` | Telegram notifications (disabled by default) |
 
 ---
 
 ## Monitoring & Logs
 
-### Log File
-
-```bash
-# Live tail
-tail -f logs/exness_bot.log
-
-# Search for trades
-grep "✅ Trade opened" logs/exness_bot.log
-grep "🔒 Position closed" logs/exness_bot.log
-
-# Search for signals
-grep "🎯 Signal" logs/exness_bot.log
-grep "🎯 MTF Setup" logs/exness_bot.log
-
-# Search for zones
-grep "🔴 Supply zones" logs/exness_bot.log
-grep "🟢 Demand zones" logs/exness_bot.log
-
-# Search for FVGs
-grep "📈 Bullish FVG" logs/exness_bot.log
-grep "📉 Bearish FVG" logs/exness_bot.log
+### Log files
+```cmd
+type logs\exness_bot.log
 ```
 
-### Status Check
-
-```bash
-bash scripts/status.sh
+Real-time log monitoring (PowerShell):
+```powershell
+Get-Content logs\exness_bot.log -Wait -Tail 50
 ```
 
-### Docker Monitoring
-
-```bash
-docker compose logs -f exness-bot          # Live logs
-docker compose logs --tail 50 exness-bot   # Last 50 lines
-docker stats exness-bot                    # CPU/RAM usage
-docker compose ps                          # Container status
-```
+### Health check
+- MT5 terminal should show "Connected" in the status bar
+- Bot logs should contain cycle entries every 5 seconds
 
 ---
 
 ## FAQ & Troubleshooting
 
-### MT5 won't connect on Linux
+### MT5 initialize failed
+- Make sure the MT5 terminal is **running and logged in**
+- Verify you are using Python 3.12 (not 3.13)
+- Leave `terminal_path` empty in config.yaml for auto-detection
 
-MT5 Python package requires Wine and a virtual X display:
-
-```bash
-# Install Wine
-sudo dpkg --add-architecture i386
-sudo apt-get update
-sudo apt-get install wine64 wine32 xvfb
-
-# Start virtual display
-Xvfb :99 -screen 0 1024x768x16 &
-export DISPLAY=:99
-```
+### Login failed
+- Check `.env` — server, login, password
+- Make sure the account is active in Exness Personal Area
+- Verify account type — must be MT5 (not MT4)
 
 ### "MetaTrader5 package not installed"
-
-```bash
+```cmd
+venv\Scripts\activate.bat
 pip install MetaTrader5
 ```
 
-If on Linux, MT5 must be installed via Wine first:
-```bash
-# Download MT5
-wget https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe
-# Install via Wine
-wine mt5setup.exe
-```
+### Bot is not trading
+- Check that the current time is within an active killzone: London 07-10, NY 12-16, Late NY 20-23 UTC
+- Verify that `XAUUSD` and `USOIL` are available on your account
+- Check the log for `confluence score` and `entry conditions` entries
 
-### Bot starts but no trades
-
-1. Check killzone — bot only trades during London (07-10), NY (12-16), Late NY (20-23) UTC
-2. Check `min_confluence_score` — default 0.60, lower to 0.50 for more signals
-3. Check logs for zone/FVG detection: `grep "Supply\|Demand\|FVG" logs/exness_bot.log`
-4. Verify MT5 symbol names match exactly (case-sensitive): `XAUUSD`, `USOIL`
-
-### Symbol not found
-
-Exness symbol names may differ. Check in MT5 Market Watch:
-```python
-import MetaTrader5 as mt5
-mt5.initialize()
-mt5.login(260474980, password="...", server="Exness-MT5Trial15")
-symbols = mt5.symbols_get()
-for s in symbols:
-    if "XAU" in s.name or "OIL" in s.name:
-        print(s.name)
-```
-
-### How to add more symbols
-
-Edit `config.yaml`:
-```yaml
-symbols:
-  - XAUUSD
-  - USOIL
-  - EURUSD     # add forex pairs
-  - GBPUSD
-```
-
-### Bot keeps reconnecting
-
-Check Exness server status and your internet connection. The bot auto-reconnects with a 30s wait on failure.
-
----
-
-## Key Differences from GoldasT Bot
-
-| Feature | GoldasT Bot (Bitunix) | Exness Bot |
-|---------|----------------------|------------|
-| Platform | Bitunix Futures (REST/WS API) | Exness MT5 (MetaTrader API) |
-| Instruments | Crypto (ETHUSDT, XAUTUSDT) | Forex/Commodities (XAUUSD, USOIL) |
-| Symbol rotation | ✅ Rotator + ban system | ❌ Removed — fixed symbol list |
-| Coin banning | ✅ PnL-based auto-ban | ❌ Removed — not applicable |
-| Supply/Demand | ❌ | ✅ Full zone detection |
-| Multi-TF | 15m + 1h HTF | 15m → 5m → 1m cascade |
-| Entry types | Market only | Market + Buy/Sell Stop |
-| Account mode | One-way | Hedging (multiple positions) |
-| Order types | REST API calls | MT5 `order_send()` |
+### How to stop the bot
+- Press `Ctrl+C` in the CMD window
+- Or stop the scheduled Task / Windows Service
