@@ -202,6 +202,20 @@ class MTFAnalyzer:
                 )
 
         # Step 4: Find best confluence setup
+        # Determine HTF trend alignment
+        htf_trend = htf_ms.trend  # TrendDirection.BULLISH/BEARISH/NEUTRAL
+        allow_long = True
+        allow_short = True
+        if self.config.require_htf_alignment and htf_trend != TrendDirection.NEUTRAL:
+            if htf_trend == TrendDirection.BULLISH:
+                allow_short = False
+            elif htf_trend == TrendDirection.BEARISH:
+                allow_long = False
+
+        # Calculate ATR for zone width filter
+        _atr_candles = candles_m15 if len(candles_m15) >= 14 else candles_m5
+        _zone_atr = self.fvg_detector.calculate_atr(_atr_candles, period=14) if len(_atr_candles) >= 2 else 0
+
         # Collect ALL valid setups, then pick closest FVG to price
         valid_setups = []
         overlap_checked = 0
@@ -213,6 +227,12 @@ class MTFAnalyzer:
         # Check SELL setups: FVG inside Supply zone
         for supply_zone in supply_zones_15m:
             if supply_zone.is_broken or supply_zone.touch_count >= 3:
+                continue
+            # Skip if HTF trend is BULLISH (no counter-trend shorts)
+            if not allow_short:
+                continue
+            # Skip overly wide zones (> 5x ATR = noise, not structure)
+            if _zone_atr > 0 and supply_zone.range > _zone_atr * 5:
                 continue
 
             # Look for SHORT FVGs (5m or 1m) inside this supply zone
@@ -263,6 +283,12 @@ class MTFAnalyzer:
         # Check BUY setups: FVG inside Demand zone
         for demand_zone in demand_zones_15m:
             if demand_zone.is_broken or demand_zone.touch_count >= 3:
+                continue
+            # Skip if HTF trend is BEARISH (no counter-trend longs)
+            if not allow_long:
+                continue
+            # Skip overly wide zones
+            if _zone_atr > 0 and demand_zone.range > _zone_atr * 5:
                 continue
 
             long_fvgs = [f for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.LONG]
@@ -355,13 +381,18 @@ class MTFAnalyzer:
                     logger.info(f"{symbol}: {overlap_found} overlaps but confluence < {self.config.min_confluence_score} (best={best_score:.2f})")
 
         elif best_setup is None and total_zones > 0 and total_fvgs > 0:
-            # Have both but no matching direction pairs
-            short_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.SHORT)
-            long_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.LONG)
-            diag_msg = (
-                f"{symbol}: direction mismatch - {len(supply_zones_15m)} supply zones need SHORT FVGs (have {short_fvg_count}), "
-                f"{len(demand_zones_15m)} demand zones need LONG FVGs (have {long_fvg_count})"
-            )
+            # Could be HTF alignment blocking, direction mismatch, or wide zones filtered
+            if not allow_short and len(supply_zones_15m) > 0:
+                diag_msg = f"{symbol}: HTF={htf_trend.value} blocks SHORT (supply zones exist but trend is BULLISH)"
+            elif not allow_long and len(demand_zones_15m) > 0:
+                diag_msg = f"{symbol}: HTF={htf_trend.value} blocks LONG (demand zones exist but trend is BEARISH)"
+            else:
+                short_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.SHORT)
+                long_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.LONG)
+                diag_msg = (
+                    f"{symbol}: direction mismatch - {len(supply_zones_15m)} supply zones need SHORT FVGs (have {short_fvg_count}), "
+                    f"{len(demand_zones_15m)} demand zones need LONG FVGs (have {long_fvg_count})"
+                )
             if diag_msg != self._last_diag.get(f"{symbol}_reason"):
                 self._last_diag[f"{symbol}_reason"] = diag_msg
                 logger.info(diag_msg)
@@ -465,10 +496,15 @@ class MTFAnalyzer:
 
         # LTF component: FVG entry quality
         ltf_score = fvg.strength
-        # Can we enter? Check fill status
-        fvg.update_fill_status(current_price)
-        if self.fvg_detector.config.entry_zone_min <= fvg.fill_percent <= self.fvg_detector.config.entry_zone_max:
-            ltf_score = min(ltf_score + 0.2, 1.0)
+        # Check fill zone readiness (read-only calculation, no mutation)
+        fvg_range = fvg.top - fvg.bottom
+        if fvg_range > 0:
+            if fvg.direction == TradeDirection.LONG:
+                fill_pct = (fvg.top - current_price) / fvg_range if fvg.bottom <= current_price <= fvg.top else 0.0
+            else:
+                fill_pct = (current_price - fvg.bottom) / fvg_range if fvg.bottom <= current_price <= fvg.top else 0.0
+            if self.fvg_detector.config.entry_zone_min <= fill_pct <= self.fvg_detector.config.entry_zone_max:
+                ltf_score = min(ltf_score + 0.2, 1.0)
         score += ltf_score * self.config.ltf_weight
 
         # BOS alignment bonus
