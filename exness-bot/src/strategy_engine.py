@@ -169,7 +169,7 @@ class StrategyEngine:
         if open_count >= self.config.position.max_positions:
             return
 
-        symbol_positions = len(sym_state.positions)
+        symbol_positions = len(sym_state.positions) + len(sym_state.pending_orders)
         if symbol_positions >= self.config.position.max_positions_per_symbol:
             return
 
@@ -308,32 +308,42 @@ class StrategyEngine:
             logger.error(f"{symbol}: Order execution failed")
             return
 
-        # Track position
+        # Track position or pending order
+        is_pending = order_type in ("BUY_STOP", "SELL_STOP")
         position = Position(
             ticket=ticket,
             symbol=symbol,
             direction=direction,
-            entry_price=current_price,
+            entry_price=setup.get("pending_price", current_price) if is_pending else current_price,
             lot_size=lot_size,
             magic=self.config.account.magic_number,
             tp_price=tpsl.tp_price,
             sl_price=tpsl.sl_price,
             tpsl_placed=True,
+            state=OrderState.AWAITING_FILL if is_pending else OrderState.TRACKING,
             fvg_bottom=entry_fvg.bottom if entry_fvg else 0,
             fvg_top=entry_fvg.top if entry_fvg else 0,
             zone_bottom=zone.bottom if zone else 0,
             zone_top=zone.top if zone else 0,
             best_price=current_price,
         )
-        sym_state.positions.append(position)
+
+        if is_pending:
+            sym_state.pending_orders.append(position)
+            logger.info(
+                f"Pending order: {symbol} {order_type} {direction.value} | "
+                f"ticket={ticket} lot={lot_size} @ {fmt_price(position.entry_price)}"
+            )
+        else:
+            sym_state.positions.append(position)
+            logger.info(
+                f"Trade opened: {symbol} {direction.value} | "
+                f"ticket={ticket} lot={lot_size} @ {fmt_price(current_price)}"
+            )
+
         sym_state.trades_executed += 1
         self.state.total_trades += 1
         self._last_entry_time[symbol] = datetime.now()
-
-        logger.info(
-            f"Trade opened: {symbol} {direction.value} | "
-            f"ticket={ticket} lot={lot_size} @ {fmt_price(current_price)}"
-        )
 
     def _manage_positions(self) -> None:
         """Manage open positions: trailing SL, BE moves."""
@@ -502,8 +512,9 @@ class StrategyEngine:
         )
 
     def cleanup_closed_positions(self) -> None:
-        """Remove positions that are no longer open in MT5."""
+        """Remove positions that are no longer open in MT5, sync pending orders."""
         for symbol, sym_state in self.state.symbols.items():
+            # --- Sync actual positions ---
             mt5_positions = self.mt5.get_open_positions(symbol)
             mt5_tickets = {p["ticket"] for p in mt5_positions}
 
@@ -513,8 +524,36 @@ class StrategyEngine:
                     f"Position closed: {symbol} {pos.direction.value} "
                     f"ticket={pos.ticket}"
                 )
-                # If it was a loss, record cooldown
-                # (We can check PnL from deal history, simplified here)
                 self._last_loss_time[symbol] = datetime.now()
 
             sym_state.positions = [p for p in sym_state.positions if p.ticket in mt5_tickets]
+
+            # --- Sync pending orders ---
+            mt5_pending = self.mt5.get_pending_orders(symbol)
+            pending_tickets = {o["ticket"] for o in mt5_pending}
+
+            # Check if any pending order got filled (now appears as position)
+            filled = [p for p in sym_state.pending_orders if p.ticket in mt5_tickets]
+            for pos in filled:
+                pos.state = OrderState.TRACKING
+                sym_state.positions.append(pos)
+                logger.info(
+                    f"Pending filled: {symbol} {pos.direction.value} "
+                    f"ticket={pos.ticket}"
+                )
+
+            # Remove filled or cancelled pending orders
+            cancelled = [
+                p for p in sym_state.pending_orders
+                if p.ticket not in pending_tickets and p.ticket not in mt5_tickets
+            ]
+            for pos in cancelled:
+                logger.info(
+                    f"Pending cancelled: {symbol} {pos.direction.value} "
+                    f"ticket={pos.ticket}"
+                )
+
+            sym_state.pending_orders = [
+                p for p in sym_state.pending_orders
+                if p.ticket in pending_tickets
+            ]

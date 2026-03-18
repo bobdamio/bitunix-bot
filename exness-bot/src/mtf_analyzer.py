@@ -259,23 +259,32 @@ class MTFAnalyzer:
                 )
             del best_setup["_fvg_dist"]
 
-        # Diagnostic: why no setup?
+        # Diagnostic: why no setup? (deduplicated)
         if best_setup is None and overlap_checked > 0:
             if overlap_found == 0:
                 details_str = "; ".join(no_overlap_details[:3])
-                logger.info(f"{symbol}: {overlap_checked} FVG-zone pairs, none overlap: {details_str}")
+                diag_msg = f"{symbol}: {overlap_checked} FVG-zone pairs, none overlap: {details_str}"
             elif confluence_passed > 0:
                 logger.debug(f"{symbol}: {confluence_passed} confluent FVG(s) but price not in entry zone yet")
+                diag_msg = None
             else:
-                logger.info(f"{symbol}: {overlap_found} overlaps but confluence < {self.config.min_confluence_score} (best={best_score:.2f})")
+                diag_msg = f"{symbol}: {overlap_found} overlaps but confluence < {self.config.min_confluence_score} (best={best_score:.2f})"
+
+            if diag_msg and diag_msg != self._last_diag.get(f"{symbol}_reason"):
+                self._last_diag[f"{symbol}_reason"] = diag_msg
+                logger.info(diag_msg)
+
         elif best_setup is None and total_zones > 0 and total_fvgs > 0:
             # Have both but no matching direction pairs
             short_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.SHORT)
             long_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.LONG)
-            logger.info(
+            diag_msg = (
                 f"{symbol}: direction mismatch - {len(supply_zones_15m)} supply zones need SHORT FVGs (have {short_fvg_count}), "
                 f"{len(demand_zones_15m)} demand zones need LONG FVGs (have {long_fvg_count})"
             )
+            if diag_msg != self._last_diag.get(f"{symbol}_reason"):
+                self._last_diag[f"{symbol}_reason"] = diag_msg
+                logger.info(diag_msg)
 
         # Step 5: Check for Buy Stop / Sell Stop opportunities
         if best_setup is None:
@@ -285,7 +294,14 @@ class MTFAnalyzer:
                 htf_ms, ltf_ms, candles_m1,
             )
             if pending_setup:
-                best_setup = pending_setup
+                # Enforce minimum confluence for pending orders too
+                if pending_setup.get("confluence_score", 0) >= self.config.min_confluence_score:
+                    best_setup = pending_setup
+                else:
+                    logger.debug(
+                        f"{symbol}: Pending setup rejected - confluence "
+                        f"{pending_setup.get('confluence_score', 0):.2f} < {self.config.min_confluence_score}"
+                    )
 
         if best_setup:
             logger.info(

@@ -235,6 +235,7 @@ class SymbolState:
     demand_zones: List[SupplyDemandZone] = field(default_factory=list)
 
     positions: List[Position] = field(default_factory=list)
+    pending_orders: List[Position] = field(default_factory=list)
 
     last_price: float = 0.0
     last_update: Optional[datetime] = None
