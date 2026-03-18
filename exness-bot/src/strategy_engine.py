@@ -185,7 +185,7 @@ class StrategyEngine:
         if entry_fvg:
             can_enter, reason = self.fvg_detector.check_entry_conditions(entry_fvg, current_price)
             if not can_enter:
-                logger.debug(f"{symbol}: FVG entry blocked — {reason}")
+                logger.debug(f"{symbol}: FVG entry blocked - {reason}")
                 return
 
         # Check zone cooldown

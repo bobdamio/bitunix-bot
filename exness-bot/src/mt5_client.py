@@ -19,7 +19,7 @@ try:
 except ImportError:
     mt5 = None
     _HAS_MT5 = False
-    logger.warning("MetaTrader5 package not installed — running in dry-run mode")
+    logger.warning("MetaTrader5 package not installed - running in dry-run mode")
 
 # MT5 timeframe constants
 _TIMEFRAME_MAP = {}
@@ -122,7 +122,7 @@ class MT5Client:
         """Reconnect if connection was lost."""
         if self.is_connected():
             return True
-        logger.warning("MT5 connection lost — attempting reconnect...")
+        logger.warning("MT5 connection lost - attempting reconnect...")
         self.disconnect()
         return self.connect()
 

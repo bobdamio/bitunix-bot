@@ -138,13 +138,13 @@ class SupplyDemandDetector:
 
         if supply_zones:
             logger.info(
-                f"🔴 Supply zones [{timeframe}] {symbol}: {len(supply_zones)} found | "
+                f"Supply zones [{timeframe}] {symbol}: {len(supply_zones)} found | "
                 f"Best: {fmt_price(supply_zones[0].bottom)}-{fmt_price(supply_zones[0].top)} "
                 f"strength={supply_zones[0].strength:.2f}"
             )
         if demand_zones:
             logger.info(
-                f"🟢 Demand zones [{timeframe}] {symbol}: {len(demand_zones)} found | "
+                f"Demand zones [{timeframe}] {symbol}: {len(demand_zones)} found | "
                 f"Best: {fmt_price(demand_zones[0].bottom)}-{fmt_price(demand_zones[0].top)} "
                 f"strength={demand_zones[0].strength:.2f}"
             )

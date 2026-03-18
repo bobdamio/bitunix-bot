@@ -45,7 +45,7 @@ class ExnessBot:
         logger.info("=" * 60)
 
         if not self.strategy.initialize():
-            logger.error("Failed to initialize strategy — exiting")
+            logger.error("Failed to initialize strategy - exiting")
             sys.exit(1)
 
         self._running = True
@@ -69,7 +69,7 @@ class ExnessBot:
                 # Ensure MT5 connection
                 if not self.mt5_client.is_connected():
                     if not self.mt5_client.reconnect():
-                        logger.error("MT5 reconnect failed — waiting 30s")
+                        logger.error("MT5 reconnect failed - waiting 30s")
                         time.sleep(30)
                         continue
 
