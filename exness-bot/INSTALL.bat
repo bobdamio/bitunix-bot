@@ -131,20 +131,19 @@ if %MT5_FOUND% equ 1 (
     goto :mt5_ok
 )
 
-echo       MT5 not found. Downloading Exness MT5 installer...
-powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.exness.com/MT5/exness5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
+echo       MT5 not found. Downloading MetaTrader 5 installer...
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
 
 if not exist "%TEMP%\mt5setup.exe" (
-    echo       [ERROR] Failed to download Exness MT5.
-    echo       Please download manually from your Exness Personal Area:
-    echo       Login at https://my.exness.com ^> your MT5 account ^> Download MT5
+    echo       [ERROR] Failed to download MetaTrader 5.
+    echo       Please download manually from: https://www.metatrader5.com/en/download
     pause
     exit /b 1
 )
 
-echo       Installing Exness MetaTrader 5...
+echo       Installing MetaTrader 5...
 start /wait "" "%TEMP%\mt5setup.exe" /auto
-del "%TEMP%\mt5setup.exe" ^>nul 2^>^&1
+del "%TEMP%\mt5setup.exe" >nul 2>&1
 
 REM Re-check after install
 if exist "%ProgramFiles%\MetaTrader 5\terminal64.exe" (
@@ -162,8 +161,11 @@ if %MT5_FOUND% equ 1 (
 :mt5_ok
 echo       [OK]
 echo.
-echo       *** IMPORTANT: Open MT5 and log in with your Exness credentials. ***
-echo       *** Server, login and password are in your Exness Personal Area. ***
+echo       *** IMPORTANT: After installation, open MT5 and add your Exness server: ***
+echo       ***   1. File -^> Open an Account                                     ***
+echo       ***   2. Type "Exness" in the search box, click "Find your broker"   ***
+echo       ***   3. Select your server (e.g. Exness-MT5Trial15) and log in      ***
+echo       ***   4. Keep MT5 running - the bot needs it                         ***
 echo.
 
 REM ============================================================
