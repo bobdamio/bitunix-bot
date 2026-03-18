@@ -89,7 +89,7 @@ trend:
 tpsl:
   sl_buffer_atr_mult: 0.15           # SL buffer beyond zone edge
   sl_min_atr_mult: 0.5               # Min SL = 0.5x ATR
-  sl_max_atr_mult: 2.0               # Max SL = 2.0x ATR
+  sl_max_atr_mult: 4.0               # Max SL = 4.0x ATR (structural SL needs room)
   default_rr: 2.0                    # Default risk:reward ratio
   min_rr: 1.0                        # Minimum R:R (for 1:1 targets)
   max_rr: 3.0                        # Maximum R:R

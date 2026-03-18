@@ -208,8 +208,8 @@ class StrategyEngine:
             logger.info(f"{symbol}: Setup found but zone is on cooldown")
             return
 
-        # Execute trade
-        self._execute_setup(symbol, sym_state, setup, current_price, candles_m1)
+        # Execute trade (pass M15 candles for proper ATR calculation)
+        self._execute_setup(symbol, sym_state, setup, current_price, candles_m15)
 
     def _execute_setup(
         self,

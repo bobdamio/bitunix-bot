@@ -205,16 +205,18 @@ class FVGDetector:
             return False, "FVG violated (zone broken)"
 
         # Zone-edge proximity entry (anticipation)
+        # LONG: price just dipped below FVG bottom = anticipating bounce up
+        # SHORT: price just rose above FVG top = anticipating drop down
         edge_tolerance = self.config.edge_entry_tolerance
         if fvg.fill_percent == 0.0:
             if fvg.direction == TradeDirection.LONG:
-                if current_price > fvg.top:
-                    dist_to_edge = (current_price - fvg.top) / fvg.top
+                if current_price < fvg.bottom:
+                    dist_to_edge = (fvg.bottom - current_price) / fvg.bottom
                     if 0 < dist_to_edge <= edge_tolerance:
                         return True, f"Zone-edge anticipation LONG ({dist_to_edge*100:.3f}%)"
             else:
-                if current_price < fvg.bottom:
-                    dist_to_edge = (fvg.bottom - current_price) / fvg.bottom
+                if current_price > fvg.top:
+                    dist_to_edge = (current_price - fvg.top) / fvg.top
                     if 0 < dist_to_edge <= edge_tolerance:
                         return True, f"Zone-edge anticipation SHORT ({dist_to_edge*100:.3f}%)"
 
