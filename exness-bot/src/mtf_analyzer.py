@@ -327,13 +327,10 @@ class MTFAnalyzer:
             if overlap_found == 0:
                 diag_msg = f"no_overlap:{overlap_checked}:{zone_str}"
             elif waiting_setups:
-                # Show the nearest waiting setup at INFO (deduplicated)
+                # Show the nearest waiting setup at INFO (deduplicated by FVG identity)
                 nearest = min(waiting_setups, key=lambda w: w["dist"])
                 nf = nearest["fvg"]
-                diag_msg = (
-                    f"waiting:{nearest['dir']}:{fmt_price(nf.bottom)}-{fmt_price(nf.top)}:"
-                    f"conf={nearest['score']:.2f}:dist={nearest['dist']:.1f}"
-                )
+                diag_msg = f"waiting:{nearest['dir']}:{fmt_price(nf.bottom)}-{fmt_price(nf.top)}"
                 if diag_msg != self._last_diag.get(f"{symbol}_reason"):
                     self._last_diag[f"{symbol}_reason"] = diag_msg
                     logger.info(
