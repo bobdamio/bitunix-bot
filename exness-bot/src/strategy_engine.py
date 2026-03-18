@@ -425,10 +425,14 @@ class StrategyEngine:
                     pos.trailing_state = "breakeven"
                     logger.info(f"BE activated: {symbol} ticket={pos.ticket} SL->{fmt_price(new_sl)}")
 
-        # Phase 3: Runner at 2R
+        # Phase 3: Runner at 2R — adaptive trail (tighter as R grows)
         runner_at = self.config.tpsl.trailing_runner_at_r
-        runner_trail = self.config.tpsl.trailing_runner_sl_distance_r
+        base_trail = self.config.tpsl.trailing_runner_sl_distance_r
         step_r = self.config.tpsl.trailing_step_r
+
+        # Adaptive: trail distance shrinks as profit grows
+        # 2R → trail 1.5R, 3R → trail 1.0R, 4R+ → trail 0.7R
+        runner_trail = max(0.7, base_trail - (current_r - runner_at) * 0.5)
 
         if current_r >= runner_at and pos.trailing_state in ("breakeven", "trailing"):
             pos.trailing_state = "trailing"
