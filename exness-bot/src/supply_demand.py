@@ -162,10 +162,8 @@ class SupplyDemandDetector:
 
     def find_fvg_in_zone(self, fvg, zones: List[SupplyDemandZone]) -> Optional[SupplyDemandZone]:
         """
-        Check if an FVG overlaps with any supply/demand zone.
-        This is the key confluence check:
-        - FVG inside Supply zone → strong SHORT signal
-        - FVG inside Demand zone → strong LONG signal
+        Check if an FVG overlaps with or is adjacent to any supply/demand zone.
+        Uses a proximity buffer so near-touches count as overlap.
 
         Returns the overlapping zone or None.
         """
@@ -175,18 +173,24 @@ class SupplyDemandDetector:
             if zone.touch_count >= self.config.zone_touch_invalidation:
                 continue
 
-            # Check overlap between FVG and zone
-            overlap_top = min(fvg.top, zone.top)
-            overlap_bottom = max(fvg.bottom, zone.bottom)
+            # Proximity buffer: 20% of zone range (allows near-touching FVGs)
+            proximity = zone.range * 0.20
 
-            if overlap_top > overlap_bottom:
-                # There is overlap
+            # Expand zone slightly for overlap check
+            expanded_bottom = zone.bottom - proximity
+            expanded_top = zone.top + proximity
+
+            overlap_top = min(fvg.top, expanded_top)
+            overlap_bottom = max(fvg.bottom, expanded_bottom)
+
+            if overlap_top >= overlap_bottom:
+                # There is overlap (>= to catch exact touching)
                 overlap_size = overlap_top - overlap_bottom
                 fvg_size = fvg.range
                 overlap_pct = overlap_size / fvg_size if fvg_size > 0 else 0
 
-                # Require at least 30% overlap
-                if overlap_pct >= 0.30:
+                # Require at least 20% overlap (lowered to accommodate proximity)
+                if overlap_pct >= 0.20:
                     return zone
 
         return None

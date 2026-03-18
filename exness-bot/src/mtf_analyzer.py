@@ -122,9 +122,10 @@ class MTFAnalyzer:
         total_fvgs = len(fvgs_1m) + len(fvgs_5m) + len(fvgs_15m)
         total_zones = len(supply_zones_15m) + len(demand_zones_15m)
 
-        # Build FVG detail string
+        # Build FVG detail string (sorted consistently by bottom price)
+        all_fvgs_display = sorted((fvgs_1m + fvgs_5m + fvgs_15m), key=lambda f: f.bottom)[:6]
         fvg_details = []
-        for f in (fvgs_1m + fvgs_5m + fvgs_15m)[:6]:
+        for f in all_fvgs_display:
             fvg_details.append(f"{f.direction.value[0]}({f.timeframe}){fmt_price(f.bottom)}-{fmt_price(f.top)}")
         fvg_str = ", ".join(fvg_details) if fvg_details else "none"
 
@@ -136,8 +137,8 @@ class MTFAnalyzer:
             zone_details.append(f"D:{fmt_price(z.bottom)}-{fmt_price(z.top)}(str={z.strength:.2f})")
         zone_str = ", ".join(zone_details) if zone_details else "none"
 
-        # Only log when FVG/zone data changes (suppress identical repeats)
-        diag_key = f"{fvg_str}|{zone_str}"
+        # Dedup key: use FVG count + zone string (not exact FVG prices/order)
+        diag_key = f"{len(fvgs_1m)}_{len(fvgs_5m)}_{len(fvgs_15m)}|{zone_str}"
         if diag_key != self._last_diag.get(symbol):
             self._last_diag[symbol] = diag_key
             if total_fvgs == 0:
@@ -259,20 +260,23 @@ class MTFAnalyzer:
                 )
             del best_setup["_fvg_dist"]
 
-        # Diagnostic: why no setup? (deduplicated)
+        # Diagnostic: why no setup? (deduplicated by overlap count + zone key)
         if best_setup is None and overlap_checked > 0:
             if overlap_found == 0:
-                details_str = "; ".join(no_overlap_details[:3])
-                diag_msg = f"{symbol}: {overlap_checked} FVG-zone pairs, none overlap: {details_str}"
+                diag_msg = f"no_overlap:{overlap_checked}:{zone_str}"
             elif confluence_passed > 0:
                 logger.debug(f"{symbol}: {confluence_passed} confluent FVG(s) but price not in entry zone yet")
                 diag_msg = None
             else:
-                diag_msg = f"{symbol}: {overlap_found} overlaps but confluence < {self.config.min_confluence_score} (best={best_score:.2f})"
+                diag_msg = f"low_confluence:{overlap_found}:{best_score:.2f}"
 
             if diag_msg and diag_msg != self._last_diag.get(f"{symbol}_reason"):
                 self._last_diag[f"{symbol}_reason"] = diag_msg
-                logger.info(diag_msg)
+                if diag_msg.startswith("no_overlap"):
+                    details_str = "; ".join(no_overlap_details[:3])
+                    logger.info(f"{symbol}: {overlap_checked} FVG-zone pairs, none overlap: {details_str}")
+                else:
+                    logger.info(f"{symbol}: {overlap_found} overlaps but confluence < {self.config.min_confluence_score} (best={best_score:.2f})")
 
         elif best_setup is None and total_zones > 0 and total_fvgs > 0:
             # Have both but no matching direction pairs
