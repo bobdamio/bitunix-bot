@@ -48,7 +48,7 @@ supply_demand:
   min_zone_strength: 0.35            # Minimum strength for valid zone (lowered)
   min_impulse_atr_mult: 1.0          # Impulse move must be >= 1.0x ATR (was 1.5)
   max_base_candles: 7                # Max candles in consolidation base
-  min_base_candles: 1                # Min candles in consolidation base
+  min_base_candles: 2                # Min candles in consolidation base (was 1 = too loose)
   zone_touch_invalidation: 3         # Zone invalidated after N touches
   max_zones_per_side: 5              # Max supply/demand zones tracked
   fresh_zone_bonus: 0.20             # Bonus strength for untouched zones

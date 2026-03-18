@@ -212,10 +212,6 @@ class MTFAnalyzer:
             elif htf_trend == TrendDirection.BEARISH:
                 allow_long = False
 
-        # Calculate ATR for zone width filter
-        _atr_candles = candles_m15 if len(candles_m15) >= 14 else candles_m5
-        _zone_atr = self.fvg_detector.calculate_atr(_atr_candles, period=14) if len(_atr_candles) >= 2 else 0
-
         # Collect ALL valid setups, then pick closest FVG to price
         valid_setups = []
         overlap_checked = 0
@@ -230,9 +226,6 @@ class MTFAnalyzer:
                 continue
             # Skip if HTF trend is BULLISH (no counter-trend shorts)
             if not allow_short:
-                continue
-            # Skip overly wide zones (> 5x ATR = noise, not structure)
-            if _zone_atr > 0 and supply_zone.range > _zone_atr * 5:
                 continue
 
             # Look for SHORT FVGs (5m or 1m) inside this supply zone
@@ -286,9 +279,6 @@ class MTFAnalyzer:
                 continue
             # Skip if HTF trend is BEARISH (no counter-trend longs)
             if not allow_long:
-                continue
-            # Skip overly wide zones
-            if _zone_atr > 0 and demand_zone.range > _zone_atr * 5:
                 continue
 
             long_fvgs = [f for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.LONG]

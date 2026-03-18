@@ -133,6 +133,15 @@ class SupplyDemandDetector:
         supply_zones.sort(key=lambda z: z.strength, reverse=True)
         demand_zones.sort(key=lambda z: z.strength, reverse=True)
 
+        # Merge overlapping zones (keep the stronger one)
+        supply_zones = self._merge_overlapping_zones(supply_zones)
+        demand_zones = self._merge_overlapping_zones(demand_zones)
+
+        # Filter by max width (zones > 2x ATR are too wide to be structural)
+        max_zone_width = atr * 2.0
+        supply_zones = [z for z in supply_zones if z.range <= max_zone_width]
+        demand_zones = [z for z in demand_zones if z.range <= max_zone_width]
+
         supply_zones = supply_zones[:self.config.max_zones_per_side]
         demand_zones = demand_zones[:self.config.max_zones_per_side]
 
@@ -196,6 +205,32 @@ class SupplyDemandDetector:
         return None
 
     # ==================== Internal Methods ====================
+
+    @staticmethod
+    def _merge_overlapping_zones(zones: List[SupplyDemandZone]) -> List[SupplyDemandZone]:
+        """
+        Remove duplicate/overlapping zones. Keep the stronger zone when
+        two zones overlap by more than 50%.
+        Zones list must already be sorted by strength descending.
+        """
+        if len(zones) <= 1:
+            return zones
+
+        merged = []
+        for zone in zones:
+            is_dup = False
+            for kept in merged:
+                overlap_top = min(zone.top, kept.top)
+                overlap_bottom = max(zone.bottom, kept.bottom)
+                if overlap_top > overlap_bottom:
+                    overlap_size = overlap_top - overlap_bottom
+                    smaller_range = min(zone.range, kept.range)
+                    if smaller_range > 0 and overlap_size / smaller_range >= 0.50:
+                        is_dup = True
+                        break
+            if not is_dup:
+                merged.append(zone)
+        return merged
 
     def _find_base(
         self,
