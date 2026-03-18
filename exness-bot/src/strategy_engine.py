@@ -180,6 +180,16 @@ class StrategyEngine:
         if setup is None:
             return
 
+        # Block duplicate same-direction entry on same symbol
+        direction = setup.get("direction")
+        if direction and sym_state.positions:
+            same_dir = [p for p in sym_state.positions if p.direction == direction]
+            if same_dir:
+                logger.debug(
+                    f"{symbol}: Already have {len(same_dir)} {direction.value} position(s), skipping"
+                )
+                return
+
         # Check FVG entry conditions (if FVG-based entry)
         entry_fvg = setup.get("entry_fvg")
         if entry_fvg:

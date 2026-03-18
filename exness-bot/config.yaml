@@ -108,11 +108,11 @@ position:
   min_lot: 0.01                      # Min lot size
   max_lot: 1.0                       # Max lot size
   max_positions: 3                   # Max simultaneous positions
-  max_positions_per_symbol: 2        # Max positions per symbol (hedging)
+  max_positions_per_symbol: 1        # Max 1 position per symbol (prevents duplicate entries)
 
 # Cooldowns
 cooldowns:
-  entry_cooldown_seconds: 120        # Min time between entries
+  entry_cooldown_seconds: 300        # 5 min between entries (was 2 min)
   loss_cooldown_seconds: 300         # 5 min cooldown after loss
   zone_cooldown_seconds: 3600        # 1h — zone cooldown after SL
 
