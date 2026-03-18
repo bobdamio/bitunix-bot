@@ -171,7 +171,7 @@ exness-bot/
 
 - **Windows** 10/11 or Windows Server 2019+
 - **Python** 3.10 – 3.12 (3.13 is not supported by the MetaTrader5 package)
-- **MetaTrader 5** from Exness (installed and logged in at least once)
+- **MetaTrader 5** — auto-installed by `INSTALL.bat`, or download manually from https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe
 - **RAM:** 1GB+
 - **Internet:** stable connection
 
@@ -182,20 +182,23 @@ exness-bot/
 ### One-Click Install
 
 1. Connect to your Windows VPS via RDP
-2. Install **MetaTrader 5** from your Exness Personal Area, log in at least once
-3. Download or clone this repo:
+2. Download or clone this repo:
    ```cmd
    git clone https://github.com/bobdamio/bitunix-bot.git
    ```
-4. Open `bitunix-bot\exness-bot` folder
-5. **Double-click `INSTALL.bat`**
+3. Open `bitunix-bot\exness-bot` folder
+4. **Double-click `INSTALL.bat`**
 
 That's it. The installer will:
-- Download and install Python 3.12 (if missing)
+- Download and install **MetaTrader 5** (if missing)
+- Download and install **Python 3.12** (if missing)
 - Install all dependencies
 - Ask for your MT5 login/password
 - Set up auto-start on reboot (both MT5 and the bot)
 - Offer to start the bot immediately
+
+> **Note:** After installation, MT5 terminal will open. Log in manually the first time:
+> Server: your Exness MT5 server (e.g. `Exness-MT5Trial15`), Login and Password from your Exness account.
 
 ### Manual Setup (alternative)
 
@@ -203,7 +206,7 @@ If you prefer to install manually instead of using `install.ps1`:
 
 1. Install **Python 3.12** from https://python.org/downloads/ (check ✅ "Add to PATH")
 2. Install **Git** from https://git-scm.com/download/win
-3. Install and log into **MetaTrader 5** from Exness
+3. Install **MetaTrader 5**: download from https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe, install, then open MT5 → File → Open an Account → search for `Exness` → log in with your credentials
 4. Clone and setup:
    ```cmd
    git clone https://github.com/bobdamio/bitunix-bot.git

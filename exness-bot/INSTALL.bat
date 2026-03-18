@@ -107,7 +107,7 @@ echo       [OK] Saved to .env
 echo.
 
 REM ============================================================
-REM  STEP 4: Check MT5 Terminal
+REM  STEP 4: Check/Install MetaTrader 5
 REM ============================================================
 echo [4/5] Checking MetaTrader 5...
 
@@ -128,11 +128,41 @@ if exist "%ProgramFiles(x86)%\MetaTrader 5\terminal64.exe" (
 
 if %MT5_FOUND% equ 1 (
     echo       MT5 found: %MT5_EXE%
-) else (
-    echo       [!] MT5 not found. Please install from Exness Personal Area.
-    echo           After installing, run this script again.
+    goto :mt5_ok
 )
+
+echo       MT5 not found. Downloading installer...
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
+
+if not exist "%TEMP%\mt5setup.exe" (
+    echo       [ERROR] Failed to download MT5.
+    echo       Please download manually: https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe
+    pause
+    exit /b 1
+)
+
+echo       Installing MetaTrader 5...
+start /wait "" "%TEMP%\mt5setup.exe" /auto
+del "%TEMP%\mt5setup.exe" ^>nul 2^>^&1
+
+REM Re-check after install
+if exist "%ProgramFiles%\MetaTrader 5\terminal64.exe" (
+    set MT5_FOUND=1
+    set "MT5_EXE=%ProgramFiles%\MetaTrader 5\terminal64.exe"
+)
+
+if %MT5_FOUND% equ 1 (
+    echo       MT5 installed: %MT5_EXE%
+) else (
+    echo       [!] MT5 may have installed to a custom location.
+    echo           Please open MT5 manually and log in.
+)
+
+:mt5_ok
 echo       [OK]
+echo.
+echo       *** IMPORTANT: Open MT5, go to File ^> Open an Account,
+echo           search for "Exness", select your server and log in. ***
 echo.
 
 REM ============================================================
