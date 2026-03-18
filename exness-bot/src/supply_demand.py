@@ -246,7 +246,7 @@ class SupplyDemandDetector:
         """
         max_base = self.config.max_base_candles
         min_base = self.config.min_base_candles
-        small_body_threshold = atr * 0.5
+        small_body_threshold = atr * 0.7
 
         base_end = impulse_idx - 1
         base_start = base_end

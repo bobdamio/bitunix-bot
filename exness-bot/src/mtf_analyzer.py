@@ -169,9 +169,19 @@ class MTFAnalyzer:
         if len(candles_m1) >= 5:
             ltf_ms.warmup(candles_m1)
 
+        # Fallback: if M15 has no zones, use M5 zones
+        if supply_zones_15m or demand_zones_15m:
+            active_supply = supply_zones_15m
+            active_demand = demand_zones_15m
+            zone_tf_label = "M15"
+        else:
+            active_supply = supply_zones_5m
+            active_demand = demand_zones_5m
+            zone_tf_label = "M5"
+
         # Diagnostic: log what was found with details
         total_fvgs = len(fvgs_1m) + len(fvgs_5m) + len(fvgs_15m)
-        total_zones = len(supply_zones_15m) + len(demand_zones_15m)
+        total_zones = len(active_supply) + len(active_demand)
 
         # Build FVG detail string (sorted consistently by bottom price)
         all_fvgs_display = sorted((fvgs_1m + fvgs_5m + fvgs_15m), key=lambda f: f.bottom)[:6]
@@ -182,23 +192,24 @@ class MTFAnalyzer:
 
         # Build zone detail string
         zone_details = []
-        for z in supply_zones_15m:
+        for z in active_supply:
             zone_details.append(f"S:{fmt_price(z.bottom)}-{fmt_price(z.top)}(str={z.strength:.2f})")
-        for z in demand_zones_15m:
+        for z in active_demand:
             zone_details.append(f"D:{fmt_price(z.bottom)}-{fmt_price(z.top)}(str={z.strength:.2f})")
         zone_str = ", ".join(zone_details) if zone_details else "none"
 
-        # Dedup key: use FVG count + zone string (not exact FVG prices/order)
-        diag_key = f"{len(fvgs_1m)}_{len(fvgs_5m)}_{len(fvgs_15m)}|{zone_str}"
+        # Dedup key: use total FVG count + zone boundaries only (not strengths/per-TF counts)
+        zone_key = "|".join(f"{z.zone_type.value}:{fmt_price(z.bottom)}-{fmt_price(z.top)}" for z in active_supply + active_demand) or "none"
+        diag_key = f"{total_fvgs}|{zone_key}"
         if diag_key != self._last_diag.get(symbol):
             self._last_diag[symbol] = diag_key
             if total_fvgs == 0:
                 logger.info(f"{symbol} @{fmt_price(current_price)}: No FVGs | zones={zone_str}")
             elif total_zones == 0:
-                logger.info(f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | NO 15m zones found")
+                logger.info(f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | NO zones found (M15+M5)")
             else:
                 logger.info(
-                    f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | zones=[{zone_str}]"
+                    f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | {zone_tf_label} zones=[{zone_str}]"
                 )
 
         # Step 4: Find best confluence setup
@@ -221,7 +232,7 @@ class MTFAnalyzer:
         no_overlap_details = []
 
         # Check SELL setups: FVG inside Supply zone
-        for supply_zone in supply_zones_15m:
+        for supply_zone in active_supply:
             if supply_zone.is_broken or supply_zone.touch_count >= 3:
                 continue
             # Skip if HTF trend is BULLISH (no counter-trend shorts)
@@ -274,7 +285,7 @@ class MTFAnalyzer:
                     })
 
         # Check BUY setups: FVG inside Demand zone
-        for demand_zone in demand_zones_15m:
+        for demand_zone in active_demand:
             if demand_zone.is_broken or demand_zone.touch_count >= 3:
                 continue
             # Skip if HTF trend is BEARISH (no counter-trend longs)
@@ -372,16 +383,16 @@ class MTFAnalyzer:
 
         elif best_setup is None and total_zones > 0 and total_fvgs > 0:
             # Could be HTF alignment blocking, direction mismatch, or wide zones filtered
-            if not allow_short and len(supply_zones_15m) > 0:
+            if not allow_short and len(active_supply) > 0:
                 diag_msg = f"{symbol}: HTF={htf_trend.value} blocks SHORT (supply zones exist but trend is BULLISH)"
-            elif not allow_long and len(demand_zones_15m) > 0:
+            elif not allow_long and len(active_demand) > 0:
                 diag_msg = f"{symbol}: HTF={htf_trend.value} blocks LONG (demand zones exist but trend is BEARISH)"
             else:
                 short_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.SHORT)
                 long_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.LONG)
                 diag_msg = (
-                    f"{symbol}: direction mismatch - {len(supply_zones_15m)} supply zones need SHORT FVGs (have {short_fvg_count}), "
-                    f"{len(demand_zones_15m)} demand zones need LONG FVGs (have {long_fvg_count})"
+                    f"{symbol}: direction mismatch - {len(active_supply)} supply zones need SHORT FVGs (have {short_fvg_count}), "
+                    f"{len(active_demand)} demand zones need LONG FVGs (have {long_fvg_count})"
                 )
             if diag_msg != self._last_diag.get(f"{symbol}_reason"):
                 self._last_diag[f"{symbol}_reason"] = diag_msg
@@ -391,7 +402,7 @@ class MTFAnalyzer:
         if best_setup is None:
             pending_setup = self._check_pending_order_setup(
                 symbol, current_price,
-                supply_zones_15m, demand_zones_15m,
+                active_supply, active_demand,
                 htf_ms, ltf_ms, candles_m1,
             )
             if pending_setup:
