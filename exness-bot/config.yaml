@@ -28,10 +28,10 @@ fvg:
   entry_zone_min: 0.25               # 25% fill — deeper zone entry = better R:R
   entry_zone_max: 0.85               # 85% max fill
   min_strength: 0.55                 # Min FVG strength for entry
-  min_gap_percent: 0.0005            # 0.05% min gap (forex spreads are tighter)
-  min_gap_atr_mult: 0.3              # Gap must be ≥ 0.3×ATR
+  min_gap_percent: 0.0003            # 0.03% min gap (lowered for more FVGs)
+  min_gap_atr_mult: 0.15             # Gap must be >= 0.15xATR (was 0.3)
   max_active_fvgs: 3                 # Max FVGs tracked per symbol
-  lookback_candles: 50               # Candles to scan for FVGs
+  lookback_candles: 100              # Candles to scan for FVGs (was 50)
   min_volume_ratio: 0.5              # Volume filter (forex volume is tick-based)
   edge_entry_tolerance: 0.0010       # 0.10% zone-edge anticipation
   min_candle_age: 1                  # Wait 1 closed candle
@@ -44,11 +44,11 @@ fvg:
 # Supply/Demand Zone Settings
 supply_demand:
   enabled: true
-  lookback_candles: 100              # Candles to look back for zones
-  min_zone_strength: 0.5             # Minimum strength for valid zone
-  min_impulse_atr_mult: 1.5          # Impulse move must be ≥ 1.5x ATR
-  max_base_candles: 5                # Max candles in consolidation base
-  min_base_candles: 2                # Min candles in consolidation base
+  lookback_candles: 200              # Candles to look back for zones (200 x M15 = ~50h)
+  min_zone_strength: 0.35            # Minimum strength for valid zone (lowered)
+  min_impulse_atr_mult: 1.0          # Impulse move must be >= 1.0x ATR (was 1.5)
+  max_base_candles: 7                # Max candles in consolidation base
+  min_base_candles: 1                # Min candles in consolidation base
   zone_touch_invalidation: 3         # Zone invalidated after N touches
   max_zones_per_side: 5              # Max supply/demand zones tracked
   fresh_zone_bonus: 0.20             # Bonus strength for untouched zones
@@ -118,7 +118,7 @@ cooldowns:
 
 # Session Settings (ICT Killzones)
 session:
-  enabled: true
+  enabled: false
   killzones:
     - name: "London"
       start_hour: 7
