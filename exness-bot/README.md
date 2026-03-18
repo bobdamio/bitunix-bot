@@ -171,8 +171,9 @@ exness-bot/
 
 - **Windows** 10/11 or Windows Server 2019+
 - **Python** 3.10 – 3.12 (3.13 is not supported by the MetaTrader5 package)
-- **MetaTrader 5** — auto-installed by `INSTALL.bat`, or download from [metatrader5.com](https://www.metatrader5.com/en/download) ([direct link](https://download.terminal.free/cdn/web/metaquotes.ltd/mt5/mt5setup.exe))
-  > **Note:** Any MT5 installer works (generic or Exness-branded). After installing, open MT5 → File → Open an Account → search "Exness" → select your server and log in.
+- **MetaTrader 5** — auto-installed by `INSTALL.bat`, or download the Exness-branded version:
+  - [Direct download](https://download.mql5.com/cdn/web/exness.technologies.ltd/mt5/exness5setup.exe) (recommended — has Exness servers pre-configured)
+  > **Important:** The generic MT5 from metatrader5.com does NOT include Exness servers. Use the link above or download from your [Exness Personal Area](https://my.exness.com).
 - **RAM:** 1GB+
 - **Internet:** stable connection
 
@@ -198,11 +199,9 @@ That's it. The installer will:
 - Set up auto-start on reboot (both MT5 and the bot)
 - Offer to start the bot immediately
 
-> **Note:** After MT5 installation, you need to add your Exness server:
-> 1. Open MT5 → File → Open an Account
-> 2. Search "Exness" → select your server (e.g. Exness-MT5Trial15)
-> 3. Log in with credentials from your [Exness Personal Area](https://my.exness.com)
-> 4. Keep MT5 running — the bot connects to it.
+> **Note:** The Exness-branded MT5 comes with Exness servers pre-configured.
+> Just open MT5 and log in with credentials from your [Exness Personal Area](https://my.exness.com) (Server, Login, Password on your MT5 account page).
+> Keep MT5 running — the bot connects to it.
 
 ### Manual Setup (alternative)
 
@@ -210,7 +209,7 @@ If you prefer to install manually instead of using `install.ps1`:
 
 1. Install **Python 3.12** from https://python.org/downloads/ (check ✅ "Add to PATH")
 2. Install **Git** from https://git-scm.com/download/win
-3. Install **MetaTrader 5** from [metatrader5.com](https://www.metatrader5.com/en/download). After installing, open MT5 → File → Open an Account → search "Exness" → select your server → log in with your Exness credentials.
+3. Install **MetaTrader 5**: download the [Exness-branded version](https://download.mql5.com/cdn/web/exness.technologies.ltd/mt5/exness5setup.exe) (NOT the generic one from metatrader5.com). After installing, open MT5 and log in with your Exness credentials.
 4. Clone and setup:
    ```cmd
    git clone https://github.com/bobdamio/bitunix-bot.git

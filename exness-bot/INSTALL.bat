@@ -131,17 +131,17 @@ if %MT5_FOUND% equ 1 (
     goto :mt5_ok
 )
 
-echo       MT5 not found. Downloading MetaTrader 5 installer...
-powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.terminal.free/cdn/web/metaquotes.ltd/mt5/mt5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
+echo       MT5 not found. Downloading Exness-branded MetaTrader 5...
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/exness.technologies.ltd/mt5/exness5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
 
 if not exist "%TEMP%\mt5setup.exe" (
-    echo       [ERROR] Failed to download MetaTrader 5.
-    echo       Please download manually from: https://www.metatrader5.com/en/download
+    echo       [ERROR] Failed to download Exness MT5.
+    echo       Please download manually from: https://download.mql5.com/cdn/web/exness.technologies.ltd/mt5/exness5setup.exe
     pause
     exit /b 1
 )
 
-echo       Installing MetaTrader 5...
+echo       Installing Exness MetaTrader 5...
 start /wait "" "%TEMP%\mt5setup.exe" /auto
 del "%TEMP%\mt5setup.exe" >nul 2>&1
 
@@ -161,11 +161,9 @@ if %MT5_FOUND% equ 1 (
 :mt5_ok
 echo       [OK]
 echo.
-echo       *** IMPORTANT: After installation, open MT5 and add your Exness server: ***
-echo       ***   1. File -^> Open an Account                                     ***
-echo       ***   2. Type "Exness" in the search box, click "Find your broker"   ***
-echo       ***   3. Select your server (e.g. Exness-MT5Trial15) and log in      ***
-echo       ***   4. Keep MT5 running - the bot needs it                         ***
+echo       *** MT5 is installed with Exness servers pre-configured.             ***
+echo       *** Open MT5 and log in with your Exness credentials.               ***
+echo       *** Server, login and password are in your Exness Personal Area.    ***
 echo.
 
 REM ============================================================
