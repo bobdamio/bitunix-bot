@@ -49,6 +49,7 @@ class MTFAnalyzer:
 
         # Per-symbol market structure for each timeframe
         self._structures: Dict[str, Dict[str, MarketStructure]] = {}
+        self._last_diag: Dict[str, str] = {}  # suppress repeated diagnostic logs
 
     def _get_structure(self, symbol: str, timeframe: str) -> MarketStructure:
         """Get or create MarketStructure for symbol/timeframe."""
@@ -135,14 +136,18 @@ class MTFAnalyzer:
             zone_details.append(f"D:{fmt_price(z.bottom)}-{fmt_price(z.top)}(str={z.strength:.2f})")
         zone_str = ", ".join(zone_details) if zone_details else "none"
 
-        if total_fvgs == 0:
-            logger.info(f"{symbol} @{fmt_price(current_price)}: No FVGs | zones={zone_str}")
-        elif total_zones == 0:
-            logger.info(f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | NO 15m zones found")
-        else:
-            logger.info(
-                f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | zones=[{zone_str}]"
-            )
+        # Only log when FVG/zone data changes (suppress identical repeats)
+        diag_key = f"{fvg_str}|{zone_str}"
+        if diag_key != self._last_diag.get(symbol):
+            self._last_diag[symbol] = diag_key
+            if total_fvgs == 0:
+                logger.info(f"{symbol} @{fmt_price(current_price)}: No FVGs | zones={zone_str}")
+            elif total_zones == 0:
+                logger.info(f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | NO 15m zones found")
+            else:
+                logger.info(
+                    f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | zones=[{zone_str}]"
+                )
 
         # Step 4: Find best confluence setup
         # Collect ALL valid setups, then pick closest FVG to price
