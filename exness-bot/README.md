@@ -171,7 +171,8 @@ exness-bot/
 
 - **Windows** 10/11 or Windows Server 2019+
 - **Python** 3.10 – 3.12 (3.13 is not supported by the MetaTrader5 package)
-- **MetaTrader 5** — auto-installed by `INSTALL.bat`, or download manually from https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe
+- **MetaTrader 5** — auto-installed by `INSTALL.bat`, or download from your [Exness Personal Area](https://my.exness.com) (your MT5 account → "Download MT5")
+  > **Important:** Do NOT use the generic MT5 from metaquotes.com — it won't have Exness servers. Always download MT5 from Exness.
 - **RAM:** 1GB+
 - **Internet:** stable connection
 
@@ -197,8 +198,8 @@ That's it. The installer will:
 - Set up auto-start on reboot (both MT5 and the bot)
 - Offer to start the bot immediately
 
-> **Note:** After installation, MT5 terminal will open. Log in manually the first time:
-> Server: your Exness MT5 server (e.g. `Exness-MT5Trial15`), Login and Password from your Exness account.
+> **Note:** After installation, MT5 terminal will open with Exness servers pre-configured.
+> Log in with credentials from your [Exness Personal Area](https://my.exness.com) (your MT5 account page shows Server, Login, and Password).
 
 ### Manual Setup (alternative)
 
@@ -206,7 +207,7 @@ If you prefer to install manually instead of using `install.ps1`:
 
 1. Install **Python 3.12** from https://python.org/downloads/ (check ✅ "Add to PATH")
 2. Install **Git** from https://git-scm.com/download/win
-3. Install **MetaTrader 5**: download from https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe, install, then open MT5 → File → Open an Account → search for `Exness` → log in with your credentials
+3. Install **MetaTrader 5**: download from your [Exness Personal Area](https://my.exness.com) (your MT5 account → "Download MT5"). Do NOT use the generic MetaQuotes installer — it won't have Exness servers. After installing, open MT5 and log in with your Exness credentials.
 4. Clone and setup:
    ```cmd
    git clone https://github.com/bobdamio/bitunix-bot.git

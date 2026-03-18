@@ -131,17 +131,18 @@ if %MT5_FOUND% equ 1 (
     goto :mt5_ok
 )
 
-echo       MT5 not found. Downloading installer...
-powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
+echo       MT5 not found. Downloading Exness MT5 installer...
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.exness.com/MT5/exness5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
 
 if not exist "%TEMP%\mt5setup.exe" (
-    echo       [ERROR] Failed to download MT5.
-    echo       Please download manually: https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe
+    echo       [ERROR] Failed to download Exness MT5.
+    echo       Please download manually from your Exness Personal Area:
+    echo       Login at https://my.exness.com ^> your MT5 account ^> Download MT5
     pause
     exit /b 1
 )
 
-echo       Installing MetaTrader 5...
+echo       Installing Exness MetaTrader 5...
 start /wait "" "%TEMP%\mt5setup.exe" /auto
 del "%TEMP%\mt5setup.exe" ^>nul 2^>^&1
 
@@ -161,8 +162,8 @@ if %MT5_FOUND% equ 1 (
 :mt5_ok
 echo       [OK]
 echo.
-echo       *** IMPORTANT: Open MT5, go to File ^> Open an Account,
-echo           search for "Exness", select your server and log in. ***
+echo       *** IMPORTANT: Open MT5 and log in with your Exness credentials. ***
+echo       *** Server, login and password are in your Exness Personal Area. ***
 echo.
 
 REM ============================================================
