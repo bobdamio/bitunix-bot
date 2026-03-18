@@ -185,13 +185,17 @@ class StrategyEngine:
         if entry_fvg:
             can_enter, reason = self.fvg_detector.check_entry_conditions(entry_fvg, current_price)
             if not can_enter:
-                logger.debug(f"{symbol}: FVG entry blocked - {reason}")
+                logger.info(
+                    f"{symbol}: Setup found but entry blocked - {reason} | "
+                    f"price={fmt_price(current_price)} FVG={fmt_price(entry_fvg.bottom)}-{fmt_price(entry_fvg.top)} "
+                    f"fill={entry_fvg.fill_percent*100:.1f}%"
+                )
                 return
 
         # Check zone cooldown
         zone = setup.get("zone")
         if zone and self._is_zone_spent(symbol, zone):
-            logger.debug(f"{symbol}: Zone is spent (cooldown)")
+            logger.info(f"{symbol}: Setup found but zone is on cooldown")
             return
 
         # Execute trade

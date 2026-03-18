@@ -117,17 +117,31 @@ class MTFAnalyzer:
         if len(candles_m1) >= 5:
             ltf_ms.warmup(candles_m1)
 
-        # Diagnostic: log what was found
+        # Diagnostic: log what was found with details
         total_fvgs = len(fvgs_1m) + len(fvgs_5m) + len(fvgs_15m)
         total_zones = len(supply_zones_15m) + len(demand_zones_15m)
+
+        # Build FVG detail string
+        fvg_details = []
+        for f in (fvgs_1m + fvgs_5m + fvgs_15m)[:6]:
+            fvg_details.append(f"{f.direction.value[0]}({f.timeframe}){fmt_price(f.bottom)}-{fmt_price(f.top)}")
+        fvg_str = ", ".join(fvg_details) if fvg_details else "none"
+
+        # Build zone detail string
+        zone_details = []
+        for z in supply_zones_15m:
+            zone_details.append(f"S:{fmt_price(z.bottom)}-{fmt_price(z.top)}(str={z.strength:.2f})")
+        for z in demand_zones_15m:
+            zone_details.append(f"D:{fmt_price(z.bottom)}-{fmt_price(z.top)}(str={z.strength:.2f})")
+        zone_str = ", ".join(zone_details) if zone_details else "none"
+
         if total_fvgs == 0:
-            logger.info(f"{symbol}: No FVGs found on any timeframe (price={fmt_price(current_price)})")
+            logger.info(f"{symbol} @{fmt_price(current_price)}: No FVGs | zones={zone_str}")
         elif total_zones == 0:
-            logger.info(f"{symbol}: {total_fvgs} FVGs found but no 15m zones")
+            logger.info(f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | NO 15m zones found")
         else:
             logger.info(
-                f"{symbol}: {len(fvgs_1m)} FVG(M1) + {len(fvgs_5m)} FVG(M5) + {len(fvgs_15m)} FVG(M15) | "
-                f"{len(supply_zones_15m)} supply + {len(demand_zones_15m)} demand zones"
+                f"{symbol} @{fmt_price(current_price)}: FVGs=[{fvg_str}] | zones=[{zone_str}]"
             )
 
         # Step 4: Find best confluence setup
@@ -135,6 +149,7 @@ class MTFAnalyzer:
         best_score = 0.0
         overlap_checked = 0
         overlap_found = 0
+        no_overlap_details = []
 
         # Check SELL setups: FVG inside Supply zone
         for supply_zone in supply_zones_15m:
@@ -149,6 +164,10 @@ class MTFAnalyzer:
                 # Check if FVG overlaps with supply zone
                 overlap_zone = self.sd_detector.find_fvg_in_zone(fvg, [supply_zone])
                 if overlap_zone is None:
+                    no_overlap_details.append(
+                        f"SHORT({fvg.timeframe}){fmt_price(fvg.bottom)}-{fmt_price(fvg.top)} "
+                        f"vs S:{fmt_price(supply_zone.bottom)}-{fmt_price(supply_zone.top)}"
+                    )
                     continue
                 overlap_found += 1
 
@@ -183,6 +202,10 @@ class MTFAnalyzer:
 
                 overlap_zone = self.sd_detector.find_fvg_in_zone(fvg, [demand_zone])
                 if overlap_zone is None:
+                    no_overlap_details.append(
+                        f"LONG({fvg.timeframe}){fmt_price(fvg.bottom)}-{fmt_price(fvg.top)} "
+                        f"vs D:{fmt_price(demand_zone.bottom)}-{fmt_price(demand_zone.top)}"
+                    )
                     continue
                 overlap_found += 1
 
@@ -208,9 +231,18 @@ class MTFAnalyzer:
         # Diagnostic: why no setup?
         if best_setup is None and overlap_checked > 0:
             if overlap_found == 0:
-                logger.info(f"{symbol}: {overlap_checked} FVG-zone pairs checked, none overlap")
+                details_str = "; ".join(no_overlap_details[:3])
+                logger.info(f"{symbol}: {overlap_checked} FVG-zone pairs, none overlap: {details_str}")
             else:
-                logger.info(f"{symbol}: {overlap_found} overlaps found but confluence < {self.config.min_confluence_score} (best={best_score:.2f})")
+                logger.info(f"{symbol}: {overlap_found} overlaps but confluence < {self.config.min_confluence_score} (best={best_score:.2f})")
+        elif best_setup is None and total_zones > 0 and total_fvgs > 0:
+            # Have both but no matching direction pairs
+            short_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.SHORT)
+            long_fvg_count = sum(1 for f in fvgs_1m + fvgs_5m if f.direction == TradeDirection.LONG)
+            logger.info(
+                f"{symbol}: direction mismatch - {len(supply_zones_15m)} supply zones need SHORT FVGs (have {short_fvg_count}), "
+                f"{len(demand_zones_15m)} demand zones need LONG FVGs (have {long_fvg_count})"
+            )
 
         # Step 5: Check for Buy Stop / Sell Stop opportunities
         if best_setup is None:
