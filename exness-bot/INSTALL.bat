@@ -132,7 +132,7 @@ if %MT5_FOUND% equ 1 (
 )
 
 echo       MT5 not found. Downloading MetaTrader 5 installer...
-powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.terminal.free/cdn/web/metaquotes.ltd/mt5/mt5setup.exe' -OutFile '%TEMP%\mt5setup.exe' -UseBasicParsing"
 
 if not exist "%TEMP%\mt5setup.exe" (
     echo       [ERROR] Failed to download MetaTrader 5.

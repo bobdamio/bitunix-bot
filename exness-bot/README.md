@@ -171,7 +171,7 @@ exness-bot/
 
 - **Windows** 10/11 or Windows Server 2019+
 - **Python** 3.10 – 3.12 (3.13 is not supported by the MetaTrader5 package)
-- **MetaTrader 5** — auto-installed by `INSTALL.bat`, or download from [metatrader5.com](https://www.metatrader5.com/en/download)
+- **MetaTrader 5** — auto-installed by `INSTALL.bat`, or download from [metatrader5.com](https://www.metatrader5.com/en/download) ([direct link](https://download.terminal.free/cdn/web/metaquotes.ltd/mt5/mt5setup.exe))
   > **Note:** Any MT5 installer works (generic or Exness-branded). After installing, open MT5 → File → Open an Account → search "Exness" → select your server and log in.
 - **RAM:** 1GB+
 - **Internet:** stable connection
