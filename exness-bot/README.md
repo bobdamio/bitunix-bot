@@ -179,85 +179,55 @@ exness-bot/
 
 ## Quick Start (Windows VPS)
 
-### Step 1: Connect to your Windows VPS
+### One-Click Install
 
-Use RDP (Remote Desktop):
-```
-mstsc /v:YOUR_VPS_IP
-```
-Or use the built-in "Remote Desktop Connection" on Windows.
+1. Connect to your Windows VPS via RDP (`mstsc /v:YOUR_VPS_IP`)
+2. Install **MetaTrader 5** from your Exness Personal Area, log in at least once
+3. Download or clone this repo:
+   ```cmd
+   git clone https://github.com/bobdamio/bitunix-bot.git
+   cd bitunix-bot\exness-bot
+   ```
+4. Right-click **PowerShell** → "Run as Administrator" and execute:
+   ```powershell
+   Set-ExecutionPolicy Bypass -Scope Process -Force
+   .\install.ps1
+   ```
 
-### Step 2: Install Python 3.12
+The installer will automatically:
+- Download and install Python 3.12 (if not present)
+- Create virtual environment and install all dependencies
+- Ask for your MT5 credentials and save them to `.env`
+- Detect your MT5 terminal installation
+- Set up auto-start on reboot (Task Scheduler + MT5 startup shortcut)
 
-1. Download from https://www.python.org/downloads/
-2. **Important:** check ✅ **"Add Python to PATH"** during installation
-3. Verify:
-```cmd
-python --version
-```
-
-### Step 3: Install Git (if not present)
-
-Download from https://git-scm.com/download/win
-
-### Step 4: Install MetaTrader 5
-
-1. Go to your Exness Personal Area → your MT5 account → "Download Terminal"
-2. Install MT5
-3. **Launch the terminal and log in** at least once manually:
-   - Server: `Exness-MT5Trial15`
-   - Login: `260474980`
-   - Password: your password
-4. **Keep MT5 running** — the bot communicates with it via the native API
-
-### Step 5: Clone the repository
-
-```cmd
-cd C:\Users\Administrator
-git clone https://github.com/bobdamio/bitunix-bot.git
-cd bitunix-bot\exness-bot
-```
-
-### Step 6: Install dependencies
-
-```cmd
-scripts\install_windows.bat
-```
-
-Or manually:
-```cmd
-python -m venv venv
-venv\Scripts\activate.bat
-pip install -r requirements.txt
-```
-
-### Step 7: Configure credentials
-
-```cmd
-copy .env.example .env
-notepad .env
-```
-
-Fill in:
-```
-MT5_SERVER=Exness-MT5Trial15
-MT5_LOGIN=260474980
-MT5_PASSWORD=your_password
-```
-
-### Step 8: Start the bot
-
+After installation, start the bot:
 ```cmd
 scripts\run_bot.bat
 ```
 
-Or manually:
-```cmd
-venv\Scripts\activate.bat
-python main.py
-```
+### Manual Setup (alternative)
 
-Expected output:
+If you prefer to install manually instead of using `install.ps1`:
+
+1. Install **Python 3.12** from https://python.org/downloads/ (check ✅ "Add to PATH")
+2. Install **Git** from https://git-scm.com/download/win
+3. Install and log into **MetaTrader 5** from Exness
+4. Clone and setup:
+   ```cmd
+   git clone https://github.com/bobdamio/bitunix-bot.git
+   cd bitunix-bot\exness-bot
+   python -m venv venv
+   venv\Scripts\activate.bat
+   pip install -r requirements.txt
+   copy .env.example .env
+   notepad .env
+   ```
+5. Fill in `.env` with your MT5 credentials
+6. Run: `scripts\run_bot.bat`
+
+### Expected output
+
 ```
 12:00:00 [INFO] ============================================================
 12:00:00 [INFO] 🤖 Exness Bot v1.0 Starting...
