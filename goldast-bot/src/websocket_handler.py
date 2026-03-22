@@ -226,7 +226,12 @@ class WebSocketHandler:
         # Pushes OHLCV snapshots every 500ms for the current forming candle
         kline_ch = f"market_kline_{self.kline_interval}"
         public_channels = []
-        for symbol in self.symbols:
+        # Always subscribe BTCUSDT for market regime detection (BTC leader filter)
+        subscribed_symbols = list(self.symbols)
+        if "BTCUSDT" not in subscribed_symbols:
+            subscribed_symbols.append("BTCUSDT")
+            logger.info("📊 Added BTCUSDT kline subscription for market regime detection")
+        for symbol in subscribed_symbols:
             clean_symbol = symbol.replace("_PERP", "")
             public_channels.append({
                 "symbol": clean_symbol,

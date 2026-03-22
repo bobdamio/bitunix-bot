@@ -230,7 +230,8 @@ class BotState:
     # Runtime state
     is_running: bool = False
     start_time: Optional[datetime] = None
-    balance: float = 0.0
+    balance: float = 0.0      # Equity (wallet + unrealized PnL)
+    available: float = 0.0    # Available for new trades
     
     # Global counters
     total_trades: int = 0

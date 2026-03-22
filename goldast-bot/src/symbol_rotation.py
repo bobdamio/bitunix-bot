@@ -1,5 +1,5 @@
 """
-Symbol Rotation — Daily automatic symbol selection.
+Symbol Rotation -- Daily automatic symbol selection.
 
 Runs the FVG scanner in-process, scores all available pairs,
 selects the top N, fetches precision from exchange API, and
@@ -51,6 +51,16 @@ class ScanResult:
     trend_aligned_pct: float = 0.0    # % of FVGs aligned with EMA trend direction
     signal_rate: float = 0.0          # Predicted tradeable signals per 10h window
     avg_vol_ratio: float = 0.0        # Average volume ratio on FVG candles
+    proximity_score: float = 0.0      # How close current price is to nearest valid FVG (0-100)
+    recent_fvg_pct: float = 0.0       # % of FVGs formed in last 20 candles (recent activity)
+    retest_speed: float = 0.0         # Avg candles until first retest (lower = faster fills)
+    zone_approach_rate: float = 0.0   # % of FVGs where price comes within 0.5% of zone edge
+    current_trend_strength: float = 0.0  # Abs trend score right now (0-1, higher = stronger trend)
+    actionable_proximity: float = 0.0    # Proximity ONLY to zones where trend passes threshold (0-100)
+    actionable_zone_count: int = 0       # Number of current FVGs whose direction passes trend filter
+    bos_aligned_count: int = 0           # FVGs whose direction matches recent BOS
+    htf_confluent_count: int = 0         # FVGs overlapping with 1h FVG zone
+    convergence_score: float = 0.0       # Is price moving TOWARD nearest zone? (0-100)
 
 
 class SymbolRotation:
@@ -68,45 +78,75 @@ class SymbolRotation:
         self._proven_path = "data/proven_symbols.json"
         self._last_rotation: Optional[datetime] = None
         self._symbol_info_cache: Dict[str, SymbolInfo] = {}
-        # Core symbols — always active, never removed
+        # Core symbols -- always active, never removed
         self._pinned_symbols: Set[str] = set(getattr(config, 'core_symbols', []))
-        # Blacklist — never added by rotation
+        # Blacklist -- never added by rotation
         self._blacklist: Set[str] = set(getattr(config, 'blacklist', []))
-        # Proven symbols — profitable rotation symbols, kept indefinitely
+        # Proven symbols -- profitable rotation symbols, kept indefinitely
+        self._proven_stats: Dict[str, dict] = {}  # {symbol: {promoted_at, net_pnl, trades, win_rate}}
         self._proven_symbols: Set[str] = self._load_proven()
         # PnL-based ban: {symbol: ban_until_datetime}
         self._pnl_ban_until: Dict[str, datetime] = {}
+        # Rotation cooldown: recently removed symbols can't come back immediately
+        # {symbol: removed_at_datetime}
+        self._removed_cooldown: Dict[str, datetime] = {}
 
     # ==================== Proven Symbols Persistence ====================
 
     def _load_proven(self) -> Set[str]:
-        """Load proven symbols from data/proven_symbols.json."""
+        """Load proven symbols from data/proven_symbols.json.
+        
+        Handles both formats:
+        - Legacy list: ["SYMBOL1", "SYMBOL2"]
+        - Rich dict: {"SYMBOL1": {"promoted_at": "...", ...}, ...}
+        """
         try:
             path = Path(self._proven_path)
             if path.exists():
                 with open(path, 'r') as f:
                     data = json.load(f)
-                symbols = set(data) if isinstance(data, list) else set()
+                if isinstance(data, list):
+                    # Legacy format — migrate to dict on next save
+                    symbols = set(data)
+                    self._proven_stats = {s: {"promoted_at": datetime.now().strftime("%Y-%m-%d")} for s in symbols}
+                elif isinstance(data, dict):
+                    symbols = set(data.keys())
+                    self._proven_stats = data
+                else:
+                    symbols = set()
+                    self._proven_stats = {}
                 # Remove any blacklisted or core (they have their own tier)
                 symbols -= set(getattr(self.config, 'blacklist', []))
                 symbols -= set(getattr(self.config, 'core_symbols', []))
+                self._proven_stats = {k: v for k, v in self._proven_stats.items() if k in symbols}
                 if symbols:
                     logger.info(f"⭐ Loaded {len(symbols)} proven symbols: {', '.join(sorted(symbols))}")
                 return symbols
         except Exception as e:
             logger.warning(f"Failed to load proven symbols: {e}")
+        self._proven_stats = {}
         return set()
 
     def _save_proven(self) -> None:
-        """Persist proven symbols to data/proven_symbols.json."""
+        """Persist proven symbols with stats to data/proven_symbols.json."""
         try:
             path = Path(self._proven_path)
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Keep only symbols still in proven set
+            stats = {s: self._proven_stats.get(s, {}) for s in sorted(self._proven_symbols)}
             with open(path, 'w') as f:
-                json.dump(sorted(self._proven_symbols), f, indent=2)
+                json.dump(stats, f, indent=2)
             logger.info(f"💾 Saved {len(self._proven_symbols)} proven symbols")
         except Exception as e:
             logger.error(f"Failed to save proven symbols: {e}")
+
+    def is_proven(self, symbol: str) -> bool:
+        """Check if symbol has proven status (public API for strategy engine)."""
+        return symbol in self._proven_symbols
+
+    def get_proven_symbols(self) -> Set[str]:
+        """Return current set of proven symbols."""
+        return set(self._proven_symbols)
 
     # ==================== Exchange Info ====================
 
@@ -182,23 +222,38 @@ class SymbolRotation:
     def _analyze_symbol(
         candles: list,
         min_gap: float = 0.0005,
+        min_gap_atr_mult: float = 0.0,
         min_volume_ratio: float = 1.3,
         entry_zone_min: float = 0.005,
         entry_zone_max: float = 0.85,
         bounce_r: float = 2.5,
         ema_fast: int = 8,
         ema_slow: int = 21,
+        min_strength: float = 0.70,
+        entry_threshold: float = 0.25,
+        long_entry_threshold: float = 0.30,
+        weight_15m: float = 0.20,
+        weight_1h: float = 0.80,
+        max_zone_distance: float = 0.025,
+        max_entry_distance: float = 0.020,
+        bos_enabled: bool = False,
+        bos_max_age_candles: int = 20,
+        bos_soft_mode: bool = False,
+        bos_direction_override: bool = False,
+        htf_fvg_enabled: bool = False,
+        htf_soft_mode: bool = False,
+        htf_fvg_min_gap: float = 0.001,
+        htf_zones: Optional[list] = None,
     ) -> Optional[Dict]:
-        """Run FVG suitability metrics with strategy-aware filters.
+        """Run FVG suitability metrics with FULL strategy pipeline simulation.
 
-        v3 changes vs v2:
-        - FVGs filtered by volume ratio (matches bot's min_volume_ratio filter)
-        - EMA trend alignment check (simulates bot's 70% 1h + 30% 15m trend weight)
-        - Bounce measured at configurable R (matches bot's min_rr from config)
-        - Fill zone uses config entry_zone_min/max instead of hardcoded 5-85%
-        - NEW: trend_aligned_pct — % of FVGs matching EMA trend direction
-        - NEW: signal_rate — predicted tradeable signals per 10h window
-        - NEW: avg_vol_ratio — average volume ratio on FVG candles
+        v5 changes (CRITICAL -- scanner must match bot's entry pipeline):
+        - FVG strength calculated like bot (gap×0.4 + vol_ratio×0.3 + trend×0.3)
+        - FVGs rejected if strength < min_strength (matches bot's filter)
+        - Trend score checked against actual entry_threshold / long_entry_threshold
+        - signal_rate only counts FVGs that pass ALL bot filters
+        - Returns None if 0 valid FVGs after filtering (don't waste a slot)
+        - Proximity only measured to VALID FVGs (passing strength + trend)
         """
         n = len(candles)
         if n < 30:
@@ -207,6 +262,11 @@ class SymbolRotation:
         price = candles[-1]["c"]
         atr = SymbolRotation._calculate_atr(candles)
         atr_pct = (atr / price * 100) if price > 0 else 0
+
+        # ATR-dynamic minimum gap (mirrors fvg_detector._compute_min_gap)
+        # If min_gap_atr_mult > 0, effective min gap = max(pct_floor, atr × mult)
+        if min_gap_atr_mult > 0 and atr > 0:
+            min_gap = max(min_gap * price, atr * min_gap_atr_mult) / price
 
         # Average volume
         volumes = [c["v"] for c in candles if c["v"] > 0]
@@ -246,14 +306,14 @@ class SymbolRotation:
                 score_1h = max(min(diff * 50, 1.0), -1.0)
 
             if score_15m is not None and score_1h is not None:
-                return score_15m * 0.3 + score_1h * 0.7
+                return score_15m * weight_15m + score_1h * weight_1h
             elif score_1h is not None:
                 return score_1h
             elif score_15m is not None:
                 return score_15m
             return None
 
-        # Trend clarity (legacy metric — measures trendiness vs chop)
+        # Trend clarity (legacy metric -- measures trendiness vs chop)
         if n >= 21:
             sma_window = 21
             above_below = []
@@ -284,17 +344,51 @@ class SymbolRotation:
                     return 1.0
                 return c2["v"] / (sum(nb_vols) / len(nb_vols))
 
+            def _calc_strength(gap_pct: float, vol_ratio: float, trend_aligned: bool,
+                               c2_candle: dict) -> float:
+                """Calculate FVG strength matching fvg_detector._calculate_strength().
+                   strength = gap_size×0.3 + volume_ratio×0.25 + trend_alignment×0.25 + impulse×0.20
+                """
+                gap_score = min(gap_pct * 100, 1.0)  # Cap at 1% = max
+                volume_score = min(vol_ratio / 2, 1.0)  # 2x avg = max
+                trend_score = 1.0 if trend_aligned else 0.0
+                # Impulse: body/range ratio of gap candle
+                c2_range = c2_candle["h"] - c2_candle["l"]
+                if c2_range > 0:
+                    imp_ratio = abs(c2_candle["c"] - c2_candle["o"]) / c2_range
+                else:
+                    imp_ratio = 0.0
+                impulse_score = min(imp_ratio / 0.5, 1.0)  # threshold 0.5
+                return gap_score * 0.3 + volume_score * 0.25 + trend_score * 0.25 + impulse_score * 0.20
+
             # Bullish FVG
             bull_gap = c3["l"] - c1["h"]
             if bull_gap > 0 and (bull_gap / c2["c"]) >= min_gap:
                 vol_ratio = _check_vol_ratio(i + 1)
                 if vol_ratio >= min_volume_ratio:
                     trend = get_trend_at(i + 2)
+                    trend_aligned = trend is not None and trend > 0
+                    gap_pct = bull_gap / c2["c"]
+                    strength = _calc_strength(gap_pct, vol_ratio, trend_aligned, c2)
+                    # Check trend passes actual entry threshold (LONG needs score >= long_entry_threshold)
+                    # When bos_direction_override=true, live engine skips trend gate entirely
+                    trend_passes = True if bos_direction_override else (trend is not None and trend >= long_entry_threshold)
+                    # v11: Check if zone was violated by subsequent price action
+                    # (matching live engine's detect_fvg_sliding_window behavior)
+                    violated = False
+                    for j in range(i + 3, n):
+                        if candles[j]["l"] <= c1["h"]:  # price broke below zone bottom
+                            violated = True
+                            break
                     fvgs.append({
                         "idx": i + 2, "dir": "LONG",
                         "top": c3["l"], "bottom": c1["h"],
                         "vol": c2["v"], "vol_ratio": vol_ratio,
-                        "trend_aligned": trend is not None and trend > 0,
+                        "strength": strength,
+                        "trend_aligned": trend_aligned,
+                        "trend_passes": trend_passes,
+                        "trend_score": trend,
+                        "violated": violated,
                     })
                     fvg_vol_ratios.append(vol_ratio)
 
@@ -304,18 +398,134 @@ class SymbolRotation:
                 vol_ratio = _check_vol_ratio(i + 1)
                 if vol_ratio >= min_volume_ratio:
                     trend = get_trend_at(i + 2)
+                    trend_aligned = trend is not None and trend < 0
+                    gap_pct = bear_gap / c2["c"]
+                    strength = _calc_strength(gap_pct, vol_ratio, trend_aligned, c2)
+                    # Check trend passes actual entry threshold (SHORT needs |score| >= entry_threshold)
+                    # When bos_direction_override=true, live engine skips trend gate entirely
+                    trend_passes = True if bos_direction_override else (trend is not None and abs(trend) >= entry_threshold)
+                    # v11: Check if zone was violated by subsequent price action
+                    violated = False
+                    for j in range(i + 3, n):
+                        if candles[j]["h"] >= c1["l"]:  # price broke above zone top
+                            violated = True
+                            break
                     fvgs.append({
                         "idx": i + 2, "dir": "SHORT",
                         "top": c1["l"], "bottom": c3["h"],
                         "vol": c2["v"], "vol_ratio": vol_ratio,
-                        "trend_aligned": trend is not None and trend < 0,
+                        "strength": strength,
+                        "trend_aligned": trend_aligned,
+                        "trend_passes": trend_passes,
+                        "trend_score": trend,
+                        "violated": violated,
                     })
                     fvg_vol_ratios.append(vol_ratio)
 
+        # * CRITICAL: Filter FVGs by min_strength -- matches bot's fvg_detector filter
+        all_fvgs = fvgs
+        fvgs = [f for f in fvgs if f["strength"] >= min_strength]
         fvg_count = len(fvgs)
         fvg_density = fvg_count / n * 100 if n > 0 else 0
 
-        # Average volume ratio on FVG candles
+        # If no FVGs pass strength filter, symbol is useless -- reject early
+        if fvg_count == 0:
+            return None
+
+        # --- BOS (Break of Structure) detection ---
+        # 5-candle fractal pattern → detect swing highs/lows → find most recent BOS
+        bos_direction = None   # "BULLISH" | "BEARISH" | None
+        bos_candles_ago = 9999
+        if bos_enabled and n >= 10:
+            swing_highs = []  # (idx, price)
+            swing_lows = []   # (idx, price)
+            for i in range(2, n - 2):
+                mid = candles[i]
+                # Swing High: mid.h > all 4 neighbors
+                if (candles[i-2]["h"] < mid["h"] and candles[i-1]["h"] < mid["h"]
+                        and candles[i+1]["h"] < mid["h"] and candles[i+2]["h"] < mid["h"]):
+                    swing_highs.append((i, mid["h"]))
+                # Swing Low: mid.l < all 4 neighbors
+                if (candles[i-2]["l"] > mid["l"] and candles[i-1]["l"] > mid["l"]
+                        and candles[i+1]["l"] > mid["l"] and candles[i+2]["l"] > mid["l"]):
+                    swing_lows.append((i, mid["l"]))
+
+            # Walk forward and find BOS events (most recent wins)
+            for j in range(5, n):
+                price = candles[j]["c"]
+                # Check bullish BOS: price > last unbroken swing high
+                valid_highs = [(idx, p) for (idx, p) in swing_highs if idx < j]
+                if valid_highs:
+                    last_high_idx, last_high_price = valid_highs[-1]
+                    if price > last_high_price:
+                        bos_direction = "BULLISH"
+                        bos_candles_ago = n - 1 - j
+                        # Mark as broken (remove so we don't trigger again)
+                        swing_highs = [(i2, p2) for (i2, p2) in swing_highs
+                                       if not (i2 == last_high_idx and p2 == last_high_price)]
+                # Check bearish BOS: price < last unbroken swing low
+                valid_lows = [(idx, p) for (idx, p) in swing_lows if idx < j]
+                if valid_lows:
+                    last_low_idx, last_low_price = valid_lows[-1]
+                    if price < last_low_price:
+                        bos_direction = "BEARISH"
+                        bos_candles_ago = n - 1 - j
+                        swing_lows = [(i2, p2) for (i2, p2) in swing_lows
+                                      if not (i2 == last_low_idx and p2 == last_low_price)]
+
+        bos_recent = bos_candles_ago <= bos_max_age_candles
+
+        # --- HTF (1h) FVG confluence check per 15m FVG ---
+        # For each 15m FVG, check if it overlaps with a same-direction 1h zone
+        htf_zones_list = htf_zones or []
+
+        # Pre-compute per-FVG flags
+        bos_aligned_count = 0
+        htf_confluent_count = 0
+        for fvg in fvgs:
+            # BOS alignment check
+            fvg_bos_ok = True  # default pass if BOS disabled
+            if bos_enabled:
+                if bos_recent and bos_direction:
+                    if fvg["dir"] == "LONG":
+                        fvg_bos_ok = bos_direction == "BULLISH"
+                    else:
+                        fvg_bos_ok = bos_direction == "BEARISH"
+                else:
+                    fvg_bos_ok = False   # no recent BOS = not aligned
+            if fvg_bos_ok and bos_enabled:
+                bos_aligned_count += 1
+            fvg["bos_ok"] = fvg_bos_ok
+
+            # HTF confluence check
+            fvg_htf_ok = True  # default pass if HTF disabled
+            if htf_fvg_enabled and htf_zones_list:
+                fvg_htf_ok = False
+                for hz in htf_zones_list:
+                    if hz["direction"] != fvg["dir"]:
+                        continue
+                    # Check overlap: 15m zone [bottom, top] vs 1h zone [bottom, top]
+                    overlap_top = min(fvg["top"], hz["top"])
+                    overlap_bottom = max(fvg["bottom"], hz["bottom"])
+                    if overlap_top > overlap_bottom:
+                        fvg_htf_ok = True
+                        break
+                    # Also check if 15m FVG mid falls inside 1h zone
+                    fvg_mid = (fvg["top"] + fvg["bottom"]) / 2
+                    if hz["bottom"] <= fvg_mid <= hz["top"]:
+                        fvg_htf_ok = True
+                        break
+            elif htf_fvg_enabled and not htf_zones_list:
+                fvg_htf_ok = False   # no 1h zones found = fail
+            if fvg_htf_ok and htf_fvg_enabled:
+                htf_confluent_count += 1
+            fvg["htf_ok"] = fvg_htf_ok
+
+            # Combined: fully actionable = trend + BOS + HTF
+            fvg["fully_actionable"] = fvg.get("trend_passes", False) and fvg_bos_ok and fvg_htf_ok
+
+        # Average volume ratio on FVG candles (only strong ones)
+        fvg_vol_ratios = [f["vol_ratio"] for f in fvgs]
         avg_vol_ratio = sum(fvg_vol_ratios) / len(fvg_vol_ratios) if fvg_vol_ratios else 0.0
 
         # Volume spike (legacy, kept for ScanResult compatibility)
@@ -387,7 +597,8 @@ class SymbolRotation:
                 r_values.append(max_r)
                 if max_r >= bounce_r:
                     bounced += 1
-                if fvg.get("trend_aligned", False):
+                # * Only count as tradeable if trend passes ACTUAL threshold
+                if fvg.get("trend_passes", False):
                     tradeable_signals += 1
 
         fill_rate = filled / fvg_count * 100 if fvg_count > 0 else 0
@@ -396,12 +607,159 @@ class SymbolRotation:
 
         # Signal rate: tradeable signals per 10h window
         if len(candles) >= 2 and candles[-1]["t"] > candles[0]["t"]:
-            span_hours = (candles[-1]["t"] - candles[0]["t"]) / 3_600_000  # ms→hours
+            span_hours = (candles[-1]["t"] - candles[0]["t"]) / 3_600_000  # ms->hours
             if span_hours <= 0:
                 span_hours = n * 0.25  # fallback: 15m per candle
         else:
             span_hours = n * 0.25
         signal_rate = tradeable_signals / span_hours * 10 if span_hours > 0 else 0
+
+        # --- Proximity Score (v5: direction-aware, config max_zone_distance) ---
+        # Only measure distance to zones where price is on the correct side
+        # LONG: price should be above or near zone (falling INTO it)
+        # SHORT: price should be below or near zone (rising INTO it)
+        # v11: Only consider RECENT FVGs for proximity (last 80 candles = 20h on 15m)
+        # so scanner proximity matches what the live engine would actually see.
+        # Older FVGs are still used for historical stats (fill/bounce/signal rate).
+        current_price = candles[-1]["c"]
+        best_proximity = 0.0
+        best_actionable_proximity = 0.0
+        actionable_zone_count = 0
+        max_dist_pct = max_zone_distance * 100  # e.g. 0.05 -> 5.0%
+        best_zone_for_convergence = None  # track nearest zone for convergence check
+        prox_recency_cutoff = max(n - 80, 0)  # only FVGs from last 80 candles for proximity
+
+        # v7: Get CURRENT trend to check actionability (not trend at FVG formation!)
+        current_trend = get_trend_at(n - 1)
+
+        for fvg in fvgs:
+            zone_top, zone_bottom = fvg["top"], fvg["bottom"]
+
+            # Direction-aware distance: how far is price from the zone entry edge?
+            if fvg["dir"] == "LONG":
+                dist = current_price - zone_top  # positive = above zone (waiting to drop)
+                dist_pct = abs(dist) / current_price * 100
+            else:  # SHORT
+                dist = zone_bottom - current_price  # positive = below zone (waiting to rise)
+                dist_pct = abs(dist) / current_price * 100
+
+            # Score: 100 if at zone edge, 0 if beyond max_zone_distance
+            prox = max(0, 100 * (1 - dist_pct / max_dist_pct))
+
+            # v11: Only RECENT + UNVIOLATED FVGs contribute to proximity
+            # Violated zones won't be visible to the live engine.
+            # Older zones won't be visible either (live buffer is ~50-100 candles).
+            is_recent = fvg["idx"] >= prox_recency_cutoff
+            is_valid = not fvg.get("violated", False)
+            if is_recent and is_valid and prox > best_proximity:
+                best_proximity = prox
+                best_zone_for_convergence = fvg
+
+            # v12: ACTIONABLE check — SCANNER ALWAYS USES SOFT MODE
+            # Scanner evaluates a snapshot every 2-4h.  BOS can flip in 15min,
+            # HTF 1h zones appear/disappear within 1h.  Hard-gating on BOS+HTF
+            # in the scanner made actP=0 for virtually ALL symbols → proven
+            # symbols perma-benched, trial selection broken.
+            # Fix: trend alignment = actionable for scanner purposes.
+            # BOS/HTF contribute to score via bos_aligned_count/htf_confluent_count
+            # but do NOT gate actionability in the scanner.
+            trend_allows_now = False
+            if bos_direction_override:
+                trend_allows_now = True
+            elif current_trend is not None:
+                if fvg["dir"] == "LONG" and current_trend >= long_entry_threshold:
+                    trend_allows_now = True
+                elif fvg["dir"] == "SHORT" and current_trend <= -entry_threshold:
+                    trend_allows_now = True
+
+            # Scanner: trend alone = actionable.  BOS/HTF boost score, not gate.
+            fully_ok = trend_allows_now
+            if fully_ok:
+                actionable_zone_count += 1
+                # v11: proximity only from recent + unviolated FVGs
+                if is_recent and is_valid and prox > best_actionable_proximity:
+                    best_actionable_proximity = prox
+
+        # --- NEW: Recent FVG Activity ---
+        # % of FVGs formed in last 20 candles (5 hours on 15m)
+        # Higher = symbol is actively creating new zones = more opportunity
+        recent_candle_threshold = max(n - 20, 0)
+        recent_fvgs = sum(1 for f in fvgs if f["idx"] >= recent_candle_threshold)
+        recent_fvg_pct = recent_fvgs / max(fvg_count, 1) * 100
+
+        # --- NEW v9: Convergence — is price MOVING TOWARD nearest zone? ---
+        # Compare distance-to-zone 5 candles ago vs now.
+        # Positive = converging (closer), 0 = static or moving away.
+        convergence_score = 0.0
+        if best_zone_for_convergence is not None and n >= 6:
+            zt = best_zone_for_convergence["top"]
+            zb = best_zone_for_convergence["bottom"]
+            p_now = candles[-1]["c"]
+            p_ago = candles[max(0, n - 6)]["c"]  # 5 candles = 1.25h on 15m
+
+            if best_zone_for_convergence["dir"] == "LONG":
+                # LONG zone: price falls from above → zone_top is entry edge
+                d_now = max(0.0, p_now - zt)
+                d_ago = max(0.0, p_ago - zt)
+            else:
+                # SHORT zone: price rises from below → zone_bottom is entry edge
+                d_now = max(0.0, zb - p_now)
+                d_ago = max(0.0, zb - p_ago)
+
+            if d_ago > 1e-12:
+                # +1.0 = reached zone, 0 = no change, <0 = moving away
+                delta = (d_ago - d_now) / d_ago
+                convergence_score = max(0.0, min(100.0, delta * 150))
+            elif d_now <= 1e-12:
+                convergence_score = 100.0  # Already at zone edge
+
+        # --- NEW: Retest Speed ---
+        # Average number of candles from FVG formation to first price touch
+        # Lower = price retests zones faster = less waiting
+        retest_candles = []
+        for fvg in fvgs:
+            idx, top, bottom = fvg["idx"], fvg["top"], fvg["bottom"]
+            for j in range(idx + 1, min(idx + 1 + lookforward, n)):
+                cj = candles[j]
+                # Check if price touched the zone
+                if cj["l"] <= top and cj["h"] >= bottom:
+                    retest_candles.append(j - idx)
+                    break
+        avg_retest_speed = sum(retest_candles) / len(retest_candles) if retest_candles else 40.0
+
+        # --- NEW: Zone Approach Rate ---
+        # % of FVGs where price comes within 0.5% of the zone edge WITHOUT
+        # necessarily filling to entry_zone_min. Measures "price tends to
+        # come close to zones" — even if it doesn't fully enter.
+        # Higher = more zone-magnetic symbol = more trade opportunities.
+        zone_approaches = 0
+        approach_threshold = 0.005  # 0.5% of price = "close enough"
+        for fvg in fvgs:
+            idx, top, bottom = fvg["idx"], fvg["top"], fvg["bottom"]
+            approached = False
+            for j in range(idx + 1, min(idx + 1 + lookforward, n)):
+                cj = candles[j]
+                if fvg["dir"] == "LONG":
+                    if cj["l"] <= bottom:
+                        break  # invalidated
+                    # How close did price get to zone top (entry edge)?
+                    dist_to_zone = (cj["l"] - top) / top if cj["l"] > top else 0
+                    if dist_to_zone <= approach_threshold or cj["l"] <= top:
+                        approached = True
+                        break
+                else:  # SHORT
+                    if cj["h"] >= top:
+                        break  # invalidated
+                    dist_to_zone = (bottom - cj["h"]) / bottom if cj["h"] < bottom else 0
+                    if dist_to_zone <= approach_threshold or cj["h"] >= bottom:
+                        approached = True
+                        break
+            if approached:
+                zone_approaches += 1
+        zone_approach_rate = zone_approaches / fvg_count * 100 if fvg_count > 0 else 0
+
+        # current_trend already computed above in proximity block
+        current_trend_strength = abs(current_trend) if current_trend is not None else 0
 
         return {
             "fvg_count": fvg_count,
@@ -416,115 +774,324 @@ class SymbolRotation:
             "trend_aligned_pct": trend_aligned_pct,
             "signal_rate": signal_rate,
             "avg_vol_ratio": avg_vol_ratio,
+            "proximity_score": best_proximity,
+            "recent_fvg_pct": recent_fvg_pct,
+            "retest_speed": avg_retest_speed,
+            "zone_approach_rate": zone_approach_rate,
+            "current_trend_strength": current_trend_strength,
+            "actionable_proximity": best_actionable_proximity,
+            "actionable_zone_count": actionable_zone_count,
+            "bos_aligned_count": bos_aligned_count,
+            "htf_confluent_count": htf_confluent_count,
+            "bos_direction": bos_direction,
+            "bos_candles_ago": bos_candles_ago,
+            "convergence_score": convergence_score,
         }
 
     @staticmethod
-    def _compute_score(m: Dict) -> float:
-        """Composite score (0-100) optimized for STRATEGY-ALIGNED signal production.
+    def _compute_score(m: Dict, rot_cfg=None) -> float:
+        """Composite score (0-100) — v11: PROXIMITY-FIRST.
 
-        v3 changes:
-        - Bounce measured at config min_rr (2.5R default) instead of hardcoded 2R
-        - NEW: Signal Rate (10pts) — predicted tradeable signals per 10h window
-        - NEW: Volume Strength (5pts) — avg volume ratio on FVG candles
-        - NEW: Trend Alignment (10pts) — % of FVGs matching EMA trend direction
-        - FVG Density reduced (10→5): raw count less important than quality
-        - Vol Spike removed → replaced by Volume Strength (directly from FVG candles)
-        - Vol 24h reduced (15→10): liquidity floor already enforced by min_24h_volume
+        v11 philosophy: "Is this coin READY TO TRADE NOW?" > "Did it trade well historically?"
 
-        Weights: Fill(20) + Bounce(15) + AvgR(20) + SignalRate(10) + VolStr(5)
-                 + TrendAlign(10) + Density(5) + ATR(5) + Vol24h(10)
-        Total: 100
+        v10 was too profitability-heavy (38pts sr+br+avg_r) — coins with great
+        history but prices 3% from zones scored high, wasted slots, zero trades.
+        v11 makes proximity the dominant factor so coins NEAR actionable zones
+        always outrank historically-good-but-far coins.
+
+        Hard Gates:
+        - No FVGs → reject
+        - sr=0 AND fr=0 → reject
+        - fr < 10% → reject
+        - sr=0 → reject
+        - bounce=0 AND avg_r < 0.5 → reject
+        - proximity too low → reject (tighter gate than v10)
+
+        Weights (total 100):
+        PROXIMITY TIER (40pts) — "Can we trade soon?"
+        - Actionable Proximity (25pts) — price near zone with all filters
+        - Any-Zone Proximity (8pts) — price near any zone
+        - Convergence (7pts) — price moving toward zone
+
+        QUALITY TIER (30pts) — "Does FVG strategy work here?"
+        - Signal Rate (10pts) — tradeable signals per window
+        - Bounce Rate (7pts) — do fills reach TP?
+        - Fill Rate (6pts) — do zones get retested?
+        - Avg R Achieved (4pts) — risk:reward
+        - Retest Speed (3pts) — speed of zone retest
+
+        FILTER TIER (20pts) — "Are conditions aligned?"
+        - Actionable Zones Exist (5pts)
+        - BOS Confirmed (5pts)
+        - HTF Confluent (5pts)
+        - Zone Approach Rate (5pts) — price historically reaches zones
+
+        LIQUIDITY TIER (10pts)
+        - ATR (3pts)
+        - Vol24h (3pts)
+        - VolStr (2pts)
+        - Cheap coin bonus (2pts)
         """
+        # * HARD GATE 1: reject symbols with no valid FVGs
+        fvg_count = m.get("fvg_count", 0)
+        if fvg_count == 0:
+            return 0.0
+
+        # * HARD GATE 2: reject symbols where zones are never retested
+        sr = m.get("signal_rate", 0)
+        fr = m.get("fill_rate", 0)
+        if sr == 0 and fr == 0:
+            return 0.0
+
+        # * HARD GATE 3: fill_rate < 10% = zones exist but price never reaches them
+        if fr < 10:
+            return 0.0
+
+        # * HARD GATE 4: sr=0 = trend never aligns with zone direction
+        #   Bot will NEVER trade this coin — wasting a slot
+        if sr == 0:
+            return 0.0
+
+        # * HARD GATE 5: bounce_rate < 15% = FVG zones don't bounce enough
+        #   Zones get filled but price doesn't reverse = guaranteed SL
+        #   Stricter than v10 (was: br=0 AND avg_r<0.5)
+        br = m.get("bounce_rate", 0)
+        avg_r = m.get("avg_r_achieved", 0)
+        if br < 15:
+            return 0.0
+
+        # * HARD GATE 6: proximity too low = zones unreachable
+        #   v12: with scanner using soft mode, actP should be populated much more
+        #   often.  Fallback threshold lowered from 70 to 50 — BOS/HTF change fast.
+        act_prox = m.get("actionable_proximity", 0)
+        any_prox = m.get("proximity_score", 0)
+        max_entry_dist = m.get("max_entry_distance_pct", 2.0)
+        max_zone_dist = m.get("max_zone_distance_pct", 5.0)
+        prox_gate = max(10.0, (1.0 - max_entry_dist / max_zone_dist) * 100)
+        if act_prox > 0:
+            if act_prox < prox_gate:
+                return 0.0
+        else:
+            if any_prox < max(prox_gate, 50):
+                return 0.0
+
         score = 0.0
 
-        # 1. Fill Rate — how often price retests FVG zones (weight: 20)
-        fr = m.get("fill_rate", 0)
-        score += min(fr / 50, 1.0) * 20
+        # ═══════════════════════════════════════════════════════
+        # PROXIMITY TIER (40pts) — "Can we trade this coin SOON?"
+        # ═══════════════════════════════════════════════════════
 
-        # 2. Bounce Rate at min_rr — quality: filled FVGs reaching target R (weight: 15)
-        br = m.get("bounce_rate", 0)
-        score += min(br / 50, 1.0) * 15
+        # 1. ACTIONABLE PROXIMITY — price near zone with ALL filters passing (25pts)
+        #    THE dominant factor. Power-1.5 scaling rewards being very close.
+        act_norm = act_prox / 100.0
+        score += (act_norm ** 1.5) * 25  # ^1.5: 0.5% → ~9pts, 2% → ~2pts
 
-        # 3. Avg R Achieved — profitability: average max-R move after fill (weight: 20)
-        avg_r = m.get("avg_r_achieved", 0)
-        if avg_r >= 3.0:
-            score += 20
-        elif avg_r >= 2.5:
-            score += 17
-        elif avg_r >= 2.0:
-            score += 14
-        elif avg_r >= 1.5:
-            score += 10
-        elif avg_r >= 1.0:
-            score += 6
-        elif avg_r >= 0.5:
-            score += 3
+        # 2. ANY-ZONE PROXIMITY — price near ANY FVG zone (8pts)
+        any_norm = any_prox / 100.0
+        score += any_norm * 8
 
-        # 4. Signal Rate — predicted tradeable signals per 10h (weight: 10)
-        #    Tradeable = filled + trend-aligned + volume-filtered
-        sr = m.get("signal_rate", 0)
+        # 3. CONVERGENCE — is price MOVING TOWARD nearest zone? (7pts)
+        conv = m.get("convergence_score", 0)
+        score += conv / 100.0 * 7
+
+        # ═══════════════════════════════════════════════════════
+        # QUALITY TIER (30pts) — "Does FVG strategy work here?"
+        # ═══════════════════════════════════════════════════════
+
+        # 4. SIGNAL RATE — tradeable signals per 10h (10pts, was 20)
         if sr >= 3.0:
             score += 10
         elif sr >= 2.0:
             score += 8
         elif sr >= 1.0:
-            score += 5
+            score += 6
         elif sr >= 0.5:
-            score += 3
-        elif sr > 0:
-            score += 1
-
-        # 5. Volume Strength — avg volume ratio on FVG candles (weight: 5)
-        #    Higher vol ratio = more institutional FVGs
-        vr = m.get("avg_vol_ratio", 0)
-        if vr >= 2.0:
-            score += 5
-        elif vr >= 1.5:
             score += 4
-        elif vr >= 1.3:
-            score += 3
-        elif vr >= 1.0:
+        elif sr > 0:
+            score += 2
+
+        # 5. BOUNCE RATE — filled FVGs reaching target R (7pts, was 10)
+        if br >= 80:
+            score += 7
+        elif br >= 60:
+            score += 5.5
+        elif br >= 40:
+            score += 4
+        elif br >= 20:
+            score += 2.5
+        elif br > 0:
             score += 1
 
-        # 6. Trend Alignment — % of FVGs in EMA trend direction (weight: 10)
-        #    80%+ aligned = clearly trending, most FVGs tradeable by bot
-        ta = m.get("trend_aligned_pct", 50)
-        score += min(ta / 80, 1.0) * 10
-
-        # 7. FVG Density — more FVGs = more chances (weight: 5)
-        d = m.get("fvg_density", 0)
-        if d <= 0:
-            score += 0
-        elif d <= 5:
-            score += d / 5 * 4
-        elif d <= 15:
+        # 6. FILL RATE — do zones get retested? (6pts, was 8)
+        if fr >= 60:
+            score += 6
+        elif fr >= 45:
             score += 5
-        elif d <= 25:
-            score += max(2, 5 - (d - 15) * 0.3)
-        else:
+        elif fr >= 35:
+            score += 4
+        elif fr >= 25:
+            score += 3
+        elif fr >= 15:
+            score += 2
+        elif fr >= 10:
             score += 1
 
-        # 8. ATR — volatility suitability (weight: 5)
+        # 7. AVG R ACHIEVED — profitability per trade (4pts, was 8)
+        if avg_r >= 3.0:
+            score += 4
+        elif avg_r >= 2.0:
+            score += 3
+        elif avg_r >= 1.5:
+            score += 2.5
+        elif avg_r >= 1.0:
+            score += 1.5
+        elif avg_r >= 0.5:
+            score += 0.5
+
+        # 8. RETEST SPEED — how fast price touches zones (3pts, was 4)
+        rs = m.get("retest_speed", 40)
+        if rs <= 3:
+            score += 3
+        elif rs <= 6:
+            score += 2.5
+        elif rs <= 10:
+            score += 2
+        elif rs <= 20:
+            score += 1
+        elif rs <= 30:
+            score += 0.5
+
+        # ═══════════════════════════════════════════════════════
+        # FILTER TIER (20pts) — "Are conditions aligned?"
+        # ═══════════════════════════════════════════════════════
+
+        # 9. ACTIONABLE ZONES EXIST — trend+BOS+HTF all pass for ≥1 FVG (5pts)
+        azc = m.get("actionable_zone_count", 0)
+        if azc >= 3:
+            score += 5
+        elif azc >= 2:
+            score += 4
+        elif azc >= 1:
+            score += 3
+
+        # 10. BOS CONFIRMED — recent BOS aligns with FVG direction (5pts)
+        bos_z = m.get("bos_aligned_count", 0)
+        if bos_z >= 3:
+            score += 5
+        elif bos_z >= 2:
+            score += 4
+        elif bos_z >= 1:
+            score += 3
+
+        # 11. HTF CONFLUENT — 15m FVGs backed by 1h zones (5pts)
+        htf_z = m.get("htf_confluent_count", 0)
+        if htf_z >= 3:
+            score += 5
+        elif htf_z >= 2:
+            score += 4
+        elif htf_z >= 1:
+            score += 3
+
+        # 12. ZONE APPROACH RATE — % of FVGs where price comes close (5pts)
+        zar = m.get("zone_approach_rate", 0)
+        if zar >= 70:
+            score += 5
+        elif zar >= 50:
+            score += 3.5
+        elif zar >= 35:
+            score += 2.5
+        elif zar >= 20:
+            score += 1.5
+        elif zar >= 10:
+            score += 0.5
+
+        # ═══════════════════════════════════════════════════════
+        # LIQUIDITY TIER (10pts)
+        # ═══════════════════════════════════════════════════════
+
+        # 13. ATR — volatility suitability (3pts)
         atr = m.get("atr_pct", 0)
         if 0.20 <= atr <= 1.50:
-            score += 5
-        elif 0.15 <= atr <= 2.00:
             score += 3
+        elif 0.15 <= atr <= 2.00:
+            score += 2
         elif atr >= 0.10:
             score += 1
 
-        # 9. 24h Volume — liquidity (weight: 10)
+        # 14. 24h Volume — liquidity (3pts)
         vol_24h = m.get("vol_24h", 0)
         if vol_24h >= 100_000_000:
-            score += 10
-        elif vol_24h >= 50_000_000:
-            score += 8
-        elif vol_24h >= 25_000_000:
-            score += 5
-        elif vol_24h >= 10_000_000:
             score += 3
+        elif vol_24h >= 50_000_000:
+            score += 2.5
+        elif vol_24h >= 10_000_000:
+            score += 1.5
+        elif vol_24h >= 5_000_000:
+            score += 1
+
+        # 15. Volume Strength — avg volume ratio on FVG candles (2pts)
+        vr = m.get("avg_vol_ratio", 0)
+        if vr >= 2.0:
+            score += 2
+        elif vr >= 1.5:
+            score += 1.5
+        elif vr >= 1.0:
+            score += 0.5
+
+        # 16. Cheap coin bonus (3pts)
+        if rot_cfg is not None:
+            price = m.get("price", 999)
+            if price < rot_cfg.cheap_coin_threshold:
+                score += rot_cfg.cheap_coin_bonus
 
         return round(score, 1)
+
+    @staticmethod
+    def _detect_htf_zones_raw(candles_1h: list, min_gap_pct: float, max_zones: int) -> list:
+        """Detect 1h FVG zones from raw candle dicts (same logic as strategy_engine).
+
+        Returns list of dicts with keys: direction, top, bottom.
+        """
+        if len(candles_1h) < 3:
+            return []
+
+        zones = []
+        for i in range(len(candles_1h) - 2):
+            c1, c2, c3 = candles_1h[i], candles_1h[i + 1], candles_1h[i + 2]
+
+            # Bullish FVG: c1.high < c3.low (gap up)
+            bull_gap = c3["l"] - c1["h"]
+            if bull_gap > 0:
+                gap_pct = bull_gap / c2["c"] if c2["c"] > 0 else 0
+                if gap_pct >= min_gap_pct:
+                    zone_top = c3["l"]
+                    zone_bottom = c1["h"]
+                    # Check not violated by subsequent candles
+                    violated = False
+                    for j in range(i + 3, len(candles_1h)):
+                        if candles_1h[j]["l"] <= zone_bottom:
+                            violated = True
+                            break
+                    if not violated:
+                        zones.append({"direction": "LONG", "top": zone_top, "bottom": zone_bottom})
+
+            # Bearish FVG: c1.low > c3.high (gap down)
+            bear_gap = c1["l"] - c3["h"]
+            if bear_gap > 0:
+                gap_pct = bear_gap / c2["c"] if c2["c"] > 0 else 0
+                if gap_pct >= min_gap_pct:
+                    zone_top = c1["l"]
+                    zone_bottom = c3["h"]
+                    violated = False
+                    for j in range(i + 3, len(candles_1h)):
+                        if candles_1h[j]["h"] >= zone_top:
+                            violated = True
+                            break
+                    if not violated:
+                        zones.append({"direction": "SHORT", "top": zone_top, "bottom": zone_bottom})
+
+        # Keep most recent zones up to max
+        return zones[-max_zones:] if len(zones) > max_zones else zones
 
     async def scan_all_symbols(
         self,
@@ -561,7 +1128,7 @@ class SymbolRotation:
         for t in tickers:
             t["_vol"] = float(t.get("quoteVol", 0) or 0)
             t["_price"] = float(t.get("lastPrice", 0) or 0)
-        # Volume floor from config (default $10M) — reject illiquid pairs
+        # Volume floor from config (default $10M) -- reject illiquid pairs
         min_vol = getattr(self.config.rotation, 'min_24h_volume', 10_000_000)
         tickers = [
             t for t in tickers
@@ -587,6 +1154,7 @@ class SymbolRotation:
         logger.info(f"🔍 Scanning {len(candidates)} pairs for FVG suitability...")
 
         results: List[ScanResult] = []
+        skipped_reasons: Dict[str, int] = {"no_candles": 0, "no_fvgs": 0, "score_zero": 0, "low_score": 0}
         for t in candidates:
             symbol = t["symbol"]
             try:
@@ -606,7 +1174,7 @@ class SymbolRotation:
                             "h": float(c.get("high", c.get("h", 0))),
                             "l": float(c.get("low", c.get("l", 0))),
                             "c": float(c.get("close", c.get("c", 0))),
-                            "v": float(c.get("volume", c.get("v", c.get("vol", c.get("quoteVol", 0))))),
+                            "v": float(c.get("baseVol", c.get("volume", c.get("v", c.get("vol", c.get("quoteVol", 0)))))),
                         })
                     elif isinstance(c, (list, tuple)) and len(c) >= 6:
                         candles.append({
@@ -618,22 +1186,79 @@ class SymbolRotation:
 
                 candles.sort(key=lambda x: x.get("t", x.get("ts", 0)))  # sort by timestamp
 
+                # --- Fetch 1h candles for HTF FVG confluence (if enabled) ---
+                htf_zones = []
+                if self.config.trend.htf_fvg_enabled:
+                    try:
+                        raw_1h = await self.exchange._api.get_klines(
+                            symbol=symbol, interval="1h", limit=100,
+                        )
+                        if isinstance(raw_1h, list) and len(raw_1h) >= 3:
+                            candles_1h = []
+                            for c in raw_1h:
+                                if isinstance(c, dict):
+                                    candles_1h.append({
+                                        "h": float(c.get("high", c.get("h", 0))),
+                                        "l": float(c.get("low", c.get("l", 0))),
+                                        "c": float(c.get("close", c.get("c", 0))),
+                                    })
+                                elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                                    candles_1h.append({
+                                        "h": float(c[2]), "l": float(c[3]), "c": float(c[4]),
+                                    })
+                            htf_min_gap = self.config.trend.htf_fvg_min_gap_percent
+                            htf_max_zones = self.config.trend.htf_fvg_max_zones
+                            htf_zones = self._detect_htf_zones_raw(
+                                candles_1h, htf_min_gap, htf_max_zones
+                            )
+                    except Exception as e:
+                        logger.debug(f"HTF candle fetch failed for {symbol}: {e}")
+
                 metrics = self._analyze_symbol(
                     candles,
                     min_gap=min_gap,
+                    min_gap_atr_mult=getattr(self.config.fvg, 'min_gap_atr_mult', 0.0),
                     min_volume_ratio=self.config.fvg.min_volume_ratio,
                     entry_zone_min=self.config.fvg.entry_zone_min,
                     entry_zone_max=self.config.fvg.entry_zone_max,
                     bounce_r=self.config.tpsl.min_rr,
                     ema_fast=self.config.trend.ema_fast,
                     ema_slow=self.config.trend.ema_slow,
+                    min_strength=self.config.fvg.min_strength,
+                    entry_threshold=self.config.trend.entry_threshold,
+                    long_entry_threshold=self.config.trend.long_entry_threshold,
+                    weight_15m=self.config.trend.weight_15m,
+                    weight_1h=self.config.trend.weight_1h,
+                    max_zone_distance=self.config.fvg.max_zone_distance,
+                    max_entry_distance=self.config.fvg.max_entry_distance,
+                    bos_enabled=self.config.trend.bos_enabled,
+                    bos_max_age_candles=self.config.trend.bos_max_age_candles,
+                    bos_soft_mode=self.config.trend.bos_soft_mode,
+                    bos_direction_override=getattr(self.config.trend, 'bos_direction_override', False),
+                    htf_fvg_enabled=self.config.trend.htf_fvg_enabled,
+                    htf_soft_mode=self.config.trend.htf_soft_mode,
+                    htf_fvg_min_gap=self.config.trend.htf_fvg_min_gap_percent,
+                    htf_zones=htf_zones,
                 )
+                if metrics:
+                    # Inject distance config for HARD GATE 6 proximity check
+                    metrics["max_entry_distance_pct"] = self.config.fvg.max_entry_distance * 100
+                    metrics["max_zone_distance_pct"] = self.config.fvg.max_zone_distance * 100
                 if not metrics:
+                    skipped_reasons["no_fvgs"] += 1
                     continue
 
-                # Inject 24h volume for scoring
+                # Inject 24h volume and price for scoring
                 metrics["vol_24h"] = t["_vol"]
-                score = self._compute_score(metrics)
+                metrics["price"] = t["_price"]
+                score = self._compute_score(metrics, self.config.rotation)
+                
+                # * Skip symbols with score 0 (failed hard gate)
+                if score <= 0:
+                    skipped_reasons["score_zero"] += 1
+                    logger.debug(f"  {symbol}: score=0 (hard gate) fvg={metrics.get('fvg_count',0)} sr={metrics.get('signal_rate',0):.1f}")
+                    continue
+                    
                 results.append(ScanResult(
                     symbol=symbol,
                     score=score,
@@ -650,6 +1275,16 @@ class SymbolRotation:
                     trend_aligned_pct=metrics.get("trend_aligned_pct", 0.0),
                     signal_rate=metrics.get("signal_rate", 0.0),
                     avg_vol_ratio=metrics.get("avg_vol_ratio", 0.0),
+                    proximity_score=metrics.get("proximity_score", 0.0),
+                    recent_fvg_pct=metrics.get("recent_fvg_pct", 0.0),
+                    retest_speed=metrics.get("retest_speed", 0.0),
+                    zone_approach_rate=metrics.get("zone_approach_rate", 0.0),
+                    current_trend_strength=metrics.get("current_trend_strength", 0.0),
+                    actionable_proximity=metrics.get("actionable_proximity", 0.0),
+                    actionable_zone_count=metrics.get("actionable_zone_count", 0),
+                    bos_aligned_count=metrics.get("bos_aligned_count", 0),
+                    htf_confluent_count=metrics.get("htf_confluent_count", 0),
+                    convergence_score=metrics.get("convergence_score", 0.0),
                 ))
             except Exception as e:
                 logger.debug(f"Scan error for {symbol}: {e}")
@@ -657,6 +1292,29 @@ class SymbolRotation:
             await asyncio.sleep(0.15)  # rate limit
 
         results.sort(key=lambda x: x.score, reverse=True)
+
+        # Diagnostic: how many symbols pass each filter individually
+        n_with_bos = sum(1 for r in results if r.bos_aligned_count > 0)
+        n_with_htf = sum(1 for r in results if r.htf_confluent_count > 0)
+        n_with_act = sum(1 for r in results if r.actionable_zone_count > 0)
+        logger.info(
+            f"📊 Scan results: {len(results)} passed / {len(candidates)} scanned | "
+            f"rejected: no_fvgs={skipped_reasons['no_fvgs']} score_zero={skipped_reasons['score_zero']}"
+        )
+        logger.info(
+            f"📊 Filter breakdown: BOS>0={n_with_bos} | HTF>0={n_with_htf} | "
+            f"actZ>0 (all 3)={n_with_act} / {len(results)} symbols"
+        )
+        if results:
+            for r in results[:20]:
+                logger.info(
+                    f"  {r.symbol:<14} score={r.score:.1f} sr={r.signal_rate:.1f} "
+                    f"fill={r.fill_rate:.0f}% zar={r.zone_approach_rate:.0f}% "
+                    f"actZ={r.actionable_zone_count} bosZ={r.bos_aligned_count} "
+                    f"htfZ={r.htf_confluent_count} actP={r.actionable_proximity:.0f} "
+                    f"prox={r.proximity_score:.0f} conv={r.convergence_score:.0f} "
+                    f"trend={r.current_trend_strength:.2f}"
+                )
         return results
 
     # ==================== Rotation Logic ====================
@@ -673,14 +1331,14 @@ class SymbolRotation:
         """Check if rotation is due and perform it if needed.
         
         PnL-aware rotation logic:
-        1. Symbols with open positions → PROTECTED (never removed)
-        2. Symbols with positive PnL → PROTECTED (keep winners)
-        3. Symbols with negative PnL → CANDIDATES for replacement
-        4. Symbols with no trades → CANDIDATES (untested)
+        1. Symbols with open positions -> PROTECTED (never removed)
+        2. Symbols with positive PnL -> PROTECTED (keep winners)
+        3. Symbols with negative PnL -> CANDIDATES for replacement
+        4. Symbols with no trades -> CANDIDATES (untested)
         5. New symbols chosen from scanner top scorers
         
         Args:
-            symbol_states: Dict[str, SymbolState] — modifiable in-place
+            symbol_states: Dict[str, SymbolState] -- modifiable in-place
             ws_handler: WebSocketHandler for resubscribing
             bot_state: BotState
             trade_history: TradeHistory for per-symbol PnL analysis
@@ -732,7 +1390,7 @@ class SymbolRotation:
                 else:
                     logger.info(f"  ⬜ {sym:<14} no trades in last {lookback}h{sig_str}")
 
-        # 3. Classify symbols into 3 tiers: Core → Proven → Trial
+        # 3. Classify symbols into 3 tiers: Core -> Proven -> Trial
         #    Accumulative growth: proven symbols stay, losers get replaced,
         #    list grows up to max_symbols (15) over time
         protected = set()
@@ -763,7 +1421,7 @@ class SymbolRotation:
                 )
 
         for sym, state in symbol_states.items():
-            # Core/pinned — always protected (own tier)
+            # Core/pinned -- always protected (own tier)
             if sym in self._pinned_symbols:
                 protected.add(sym)
                 protect_reasons[sym] = "core"
@@ -775,60 +1433,78 @@ class SymbolRotation:
                 protect_reasons[sym] = "open position"
                 continue
 
-            # Check consecutive losing streak → force remove + demote
+            # Check consecutive losing streak -> force remove + demote
+            # Trial symbols use stricter limit (trial_max_losing_trades)
             if trade_history and max_losing > 0:
+                trial_max_losing = getattr(rotation_cfg, 'trial_max_losing_trades', max_losing)
+                is_proven_sym = sym in self._proven_symbols
+                effective_max_losing = max_losing if is_proven_sym else trial_max_losing
                 streak = trade_history.get_recent_streak(sym, lookback_hours=24)
-                if streak <= -max_losing:
+                if streak <= -effective_max_losing:
                     force_remove.add(sym)
-                    if sym in self._proven_symbols:
+                    if is_proven_sym:
                         demoted.add(sym)
+                    tier_label = "proven" if is_proven_sym else "trial"
                     logger.info(
                         f"  🚫 {sym}: {abs(streak)} consecutive losses "
-                        f"→ forced removal{' (demoted from proven)' if sym in self._proven_symbols else ''}"
+                        f"(limit={effective_max_losing} for {tier_label})"
+                        f" -> forced removal{' (demoted from proven)' if is_proven_sym else ''}"
                     )
                     continue
 
-            # Silent zone ban → force remove + demote
+            # Silent zone ban -> force remove (but NEVER demote proven)
+            # Proven symbols earned status via PnL — 0 zone hits is a market
+            # condition, not poor performance.  They keep proven status and
+            # will be re-added next rotation when zones reappear.
             if sym in silent_symbols:
                 force_remove.add(sym)
-                if sym in self._proven_symbols:
-                    demoted.add(sym)
+                is_proven_sym = sym in self._proven_symbols
                 active_h = signal_tracker.hours_since_activation(sym) if signal_tracker else 0
                 logger.info(
                     f"  🔇 {sym}: 0 zone hits in {active_h:.1f}h "
-                    f"→ forced removal{' (demoted from proven)' if sym in self._proven_symbols else ''}"
+                    f"-> forced removal{' (proven status KEPT)' if is_proven_sym else ''}"
                 )
                 continue
 
-            # Check for proven promotion: profitable + enough trades
+            # Check for proven promotion: profitable + enough trades + WR
             pnl_data = symbol_pnl.get(sym)
-            if pnl_data and pnl_data['net_pnl'] >= proven_min_pnl and pnl_data['trades'] >= proven_min_trades:
-                # Promote to proven (or reconfirm)
+            proven_min_wr = getattr(rotation_cfg, 'proven_min_wr', 40.0)
+            if (pnl_data and pnl_data['net_pnl'] >= proven_min_pnl
+                    and pnl_data['trades'] >= proven_min_trades
+                    and pnl_data['win_rate'] >= proven_min_wr):
+                # Promote to proven (or reconfirm) — save stats
                 if sym not in self._proven_symbols:
                     promoted.add(sym)
                     logger.info(
                         f"  🆙 {sym}: promoted to proven "
-                        f"(PnL=${pnl_data['net_pnl']:+.2f}, {pnl_data['trades']} trades)"
+                        f"(PnL=${pnl_data['net_pnl']:+.2f}, {pnl_data['trades']} trades, "
+                        f"WR={pnl_data['win_rate']:.0f}%)"
                     )
+                self._proven_stats[sym] = {
+                    "promoted_at": datetime.now().strftime("%Y-%m-%d"),
+                    "net_pnl": round(pnl_data['net_pnl'], 2),
+                    "trades": pnl_data['trades'],
+                    "win_rate": round(pnl_data['win_rate'], 1),
+                }
                 protected.add(sym)
                 protect_reasons[sym] = f"proven PnL=${pnl_data['net_pnl']:+.2f}"
                 continue
 
-            # Already proven but not currently meeting promotion threshold → still protected (grace)
+            # Already proven but not currently meeting promotion threshold -> still protected (grace)
             if sym in self._proven_symbols:
                 protected.add(sym)
                 pnl_str = f"PnL=${pnl_data['net_pnl']:+.2f}" if pnl_data else "no recent trades"
                 protect_reasons[sym] = f"proven (grace: {pnl_str})"
                 continue
 
-            # Profitable but below proven threshold → protected (keep winners)
+            # Profitable but below proven threshold -> protected (keep winners)
             if getattr(rotation_cfg, 'protect_profitable', True):
                 if pnl_data and pnl_data['profitable']:
                     protected.add(sym)
                     protect_reasons[sym] = f"profitable PnL=${pnl_data['net_pnl']:+.2f}"
                     continue
 
-            # Everything else → replaceable (negative PnL, untested trial symbols)
+            # Everything else -> replaceable (negative PnL, untested trial symbols)
 
         # Apply proven promotions and demotions
         self._proven_symbols |= promoted
@@ -839,31 +1515,30 @@ class SymbolRotation:
         # 4. Determine replaceable symbols (negative PnL, untested, or force-removed)
         replaceable = (set(symbol_states.keys()) - protected) | force_remove
 
-        # 4.5 PnL-based ban: ban the worst-performing rotation symbol for 24h
+        # 4.5 PnL-based ban: ban ALL rotation symbols with significant losses
         pnl_ban_cfg_enabled = getattr(rotation_cfg, 'pnl_ban_enabled', False)
         pnl_ban_hours = getattr(rotation_cfg, 'pnl_ban_hours', 24)
+        pnl_ban_threshold = getattr(rotation_cfg, 'pnl_ban_threshold', -2.0)
         if pnl_ban_cfg_enabled and symbol_pnl:
-            # Only consider rotation symbols (not core) that have trades
+            # Ban any rotation symbol (not core) with net PnL below threshold
             rotation_syms_with_pnl = {
                 sym: data for sym, data in symbol_pnl.items()
                 if sym not in self._pinned_symbols and data.get('trades', 0) >= 2
             }
-            if rotation_syms_with_pnl:
-                worst_sym = min(rotation_syms_with_pnl, key=lambda s: rotation_syms_with_pnl[s]['net_pnl'])
-                worst_pnl = rotation_syms_with_pnl[worst_sym]['net_pnl']
-                if worst_pnl < 0:
+            for sym, data in rotation_syms_with_pnl.items():
+                if data['net_pnl'] < pnl_ban_threshold:
                     ban_until = now + timedelta(hours=pnl_ban_hours)
-                    self._pnl_ban_until[worst_sym] = ban_until
-                    force_remove.add(worst_sym)
-                    replaceable.add(worst_sym)
+                    self._pnl_ban_until[sym] = ban_until
+                    force_remove.add(sym)
+                    replaceable.add(sym)
                     # Demote from proven if applicable
-                    if worst_sym in self._proven_symbols:
-                        self._proven_symbols.discard(worst_sym)
-                        demoted.add(worst_sym)
+                    if sym in self._proven_symbols:
+                        self._proven_symbols.discard(sym)
+                        demoted.add(sym)
                     logger.info(
-                        f"  💀 {worst_sym}: worst daily PnL=${worst_pnl:+.2f} "
-                        f"→ banned for {pnl_ban_hours}h (until {ban_until.strftime('%H:%M')})"
-                        f"{' — demoted from proven' if worst_sym in demoted else ''}"
+                        f"  💀 {sym}: PnL=${data['net_pnl']:+.2f} < ${pnl_ban_threshold:.0f} "
+                        f"-> banned for {pnl_ban_hours}h (until {ban_until.strftime('%H:%M')})"
+                        f"{' -- demoted from proven' if sym in demoted else ''}"
                     )
 
         # Clean up expired PnL bans
@@ -908,9 +1583,47 @@ class SymbolRotation:
             self._last_rotation = now
             return None
 
-        # 6. Build new symbol list — ACCUMULATIVE GROWTH
+        # 5.5 Apply PnL adjustments — penalise losers, reward winners
+        # Negative PnL → score reduced; Positive PnL → score boosted (capped)
+        if symbol_pnl:
+            pnl_penalty_per_dollar = getattr(rotation_cfg, 'pnl_penalty_per_dollar', 5.0)
+            pnl_bonus_per_dollar = getattr(rotation_cfg, 'pnl_bonus_per_dollar', 3.0)
+            pnl_bonus_cap = getattr(rotation_cfg, 'pnl_bonus_cap', 15.0)
+            for r in results:
+                pnl_data = symbol_pnl.get(r.symbol)
+                if not pnl_data:
+                    continue
+                net = pnl_data['net_pnl']
+                old_score = r.score
+                if net < 0:
+                    penalty = abs(net) * pnl_penalty_per_dollar
+                    r.score = max(0.0, r.score - penalty)
+                    if penalty > 0:
+                        logger.debug(
+                            f"  📉 {r.symbol}: score {old_score:.1f} → {r.score:.1f} "
+                            f"(PnL penalty -{penalty:.1f} from ${net:+.2f})"
+                        )
+                elif net > 0:
+                    bonus = min(net * pnl_bonus_per_dollar, pnl_bonus_cap)
+                    r.score += bonus
+                    if bonus > 0:
+                        logger.debug(
+                            f"  📈 {r.symbol}: score {old_score:.1f} → {r.score:.1f} "
+                            f"(PnL bonus +{bonus:.1f} from ${net:+.2f})"
+                        )
+            # Re-sort after PnL adjustments
+            results.sort(key=lambda x: x.score, reverse=True)
+
+        # 5.6 Clean up expired rotation cooldowns (default 3h)
+        cooldown_hours = getattr(rotation_cfg, 'removed_cooldown_hours', 3.0)
+        expired_cd = [s for s, t in self._removed_cooldown.items()
+                      if (now - t).total_seconds() / 3600 >= cooldown_hours]
+        for s in expired_cd:
+            del self._removed_cooldown[s]
+
+        # 6. Build new symbol list -- ACCUMULATIVE GROWTH
         # Core (always) + Proven (earned their spot) + Protected (open positions) + New trials
-        # Key: proven symbols DON'T consume trial slots → list grows over time
+        # Key: proven symbols DON'T consume trial slots -> list grows over time
         rotation_pool_size = getattr(rotation_cfg, 'rotation_pool_size', 6)
         max_symbols = getattr(rotation_cfg, 'max_symbols', 15)
         min_score = rotation_cfg.min_score
@@ -924,29 +1637,37 @@ class SymbolRotation:
         for sym in self._pinned_symbols:
             new_symbols.add(sym)
 
-        # Tier 2: Keep all surviving proven symbols (not force-removed or banned)
+        # Tier 2: Keep proven symbols — ALWAYS
+        # v12: Proven symbols earned their spot through actual trading PnL.
+        # The scanner snapshot is too transient (BOS/HTF change every 15-60min)
+        # to justify benching profitable symbols.  Previously ALL proven symbols
+        # were perma-benched because actionable_proximity was always 0.
+        benched_proven = set()
         for sym in self._proven_symbols:
-            if sym not in force_remove and sym not in self._pnl_ban_until and sym not in self._blacklist:
-                new_symbols.add(sym)
+            if sym in force_remove or sym in self._pnl_ban_until or sym in self._blacklist:
+                continue
+            new_symbols.add(sym)
 
         # Tier 2.5: Keep protected symbols (open positions, profitable-but-not-proven)
         for sym in protected:
             new_symbols.add(sym)
 
         # Tier 3: Fill with NEW trial symbols from scanner
-        # Proven symbols DON'T reduce trial slots — only hard cap limits growth
+        # Proven symbols DON'T reduce trial slots -- only hard cap limits growth
         available_new_slots = min(rotation_pool_size, max_symbols - len(new_symbols))
 
+        proven_kept = len(proven_active)
         logger.info(
             f"🔄 Building list: {len(new_symbols)} kept "
-            f"({core_count} core + {len(proven_active)} proven + "
-            f"{len(new_symbols) - core_count - len(proven_active)} other) "
-            f"→ {available_new_slots} slots for new trials (max {max_symbols})"
+            f"({core_count} core + {proven_kept} proven + "
+            f"{len(new_symbols) - core_count - proven_kept} other) "
+            f"-> {available_new_slots} slots for new trials (max {max_symbols})"
         )
 
         added_trials = 0
         if available_new_slots > 0:
-            # Get eligible candidates: not in list, not blacklisted, not banned, volume OK
+            # Get eligible candidates: not in list, not blacklisted, not banned,
+            # not in cooldown, volume OK
             eligible = [
                 r for r in results
                 if r.score >= min_score
@@ -954,6 +1675,7 @@ class SymbolRotation:
                 and r.symbol not in new_symbols
                 and r.symbol not in self._blacklist
                 and r.symbol not in self._pnl_ban_until
+                and r.symbol not in self._removed_cooldown
             ]
 
             for r in eligible:
@@ -966,14 +1688,20 @@ class SymbolRotation:
                     f"vol=${r.vol_24h/1e6:.0f}M)"
                 )
 
-        # Fallback: relax score if not enough trials (but keep volume + blacklist check)
+        # Fallback: relax score if not enough trials — use 75% floor + require bounce > 0
+        #   Prevents filling slots with zero-bounce or score-4 trash during overnight hours.
         remaining_slots = available_new_slots - added_trials
+        relaxed_min = min_score * 0.75
         if remaining_slots > 0:
             for r in results:
                 if remaining_slots <= 0:
                     break
                 if (r.symbol not in new_symbols and r.symbol not in self._blacklist
-                        and r.symbol not in self._pnl_ban_until and r.vol_24h >= min_vol):
+                        and r.symbol not in self._pnl_ban_until
+                        and r.symbol not in self._removed_cooldown
+                        and r.vol_24h >= min_vol
+                        and r.score >= relaxed_min
+                        and r.bounce_rate > 0.0):
                     new_symbols.add(r.symbol)
                     remaining_slots -= 1
                     added_trials += 1
@@ -992,6 +1720,15 @@ class SymbolRotation:
         removed -= self._pinned_symbols
         added -= self._blacklist
 
+        # Add removed symbols to cooldown (prevent immediate re-selection)
+        for sym in removed:
+            self._removed_cooldown[sym] = now
+            pnl_data = symbol_pnl.get(sym)
+            pnl_str = f"PnL=${pnl_data['net_pnl']:+.2f}" if pnl_data else "no PnL"
+            logger.info(
+                f"  ⏳ {sym}: cooldown {cooldown_hours:.0f}h ({pnl_str})"
+            )
+
         if not added and not removed:
             logger.info("🔄 Rotation: no changes needed")
             self._last_rotation = now
@@ -1007,7 +1744,7 @@ class SymbolRotation:
         removed_str = ', '.join(_removed_info(s) for s in sorted(removed)) or 'none'
 
         logger.info(
-            f"🔄 Symbol rotation: {len(old_list)} → {len(new_list)} symbols "
+            f"🔄 Symbol rotation: {len(old_list)} -> {len(new_list)} symbols "
             f"(growth: {len(new_list) - len(old_list):+d})\n"
             f"   Added:    {added_str}\n"
             f"   Removed:  {removed_str}\n"
@@ -1150,3 +1887,165 @@ class SymbolRotation:
             logger.info(f"💾 Saved {len(symbols)} symbols to {self._config_path}")
         except Exception as e:
             logger.error(f"Failed to save symbols to yaml: {e}")
+
+    # ==================== Opportunity Scanner ====================
+
+    async def opportunity_scan(
+        self,
+        symbol_states: dict,
+        ws_handler,
+        signal_tracker=None,
+    ) -> Optional[List[str]]:
+        """Fast market-wide scan for immediate trading opportunities.
+
+        Runs every 15 min between full rotations. Scans top symbols by
+        volume, finds ones with price RIGHT AT an FVG zone, and hot-swaps
+        them in replacing the worst "cold" trial symbols.
+
+        Key differences from full rotation:
+        - No PnL review, promotions, or demotions
+        - Fewer candles (100 vs 200) — faster scan
+        - Only swaps if opportunity has HIGH actionable proximity
+        - Max N swaps per scan (prevents thrashing)
+        - Never touches core/proven/protected symbols
+
+        Returns:
+            List of newly added symbols, or None if no changes.
+        """
+        rot_cfg = self.config.rotation
+        if not getattr(rot_cfg, 'opportunity_scan_enabled', True):
+            return None
+
+        top_n = getattr(rot_cfg, 'opportunity_scan_top_n', 50)
+        candle_count = getattr(rot_cfg, 'opportunity_scan_candles', 100)
+        min_proximity = getattr(rot_cfg, 'opportunity_min_proximity', 70.0)
+        max_swaps = getattr(rot_cfg, 'opportunity_max_swaps', 2)
+        min_score_advantage = getattr(rot_cfg, 'opportunity_min_score_advantage', 10.0)
+
+        # 1. Identify trial symbols (candidates for swap-out)
+        #    Never swap out: core, proven, symbols with open positions
+        trial_symbols = [
+            sym for sym in symbol_states
+            if sym not in self._pinned_symbols
+            and sym not in self._proven_symbols
+            and not symbol_states[sym].has_position
+        ]
+
+        if not trial_symbols:
+            logger.debug("🎯 Opportunity scan: no trial symbols to swap out")
+            return None
+
+        # 2. Run lightweight scan (fewer candles, wider market)
+        logger.info(f"🎯 Opportunity scan: scanning {top_n} symbols ({candle_count} candles)...")
+        results = await self.scan_all_symbols(
+            top_n=top_n,
+            candle_count=candle_count,
+            min_gap=self.config.fvg.min_gap_percent,
+        )
+
+        if not results:
+            logger.info("🎯 Opportunity scan: no results from scanner")
+            return None
+
+        # 3. Find high-proximity opportunities NOT already in our list
+        current_symbols = set(symbol_states.keys())
+        min_score = rot_cfg.min_score
+        min_vol = getattr(rot_cfg, 'min_24h_volume', 10_000_000)
+
+        opportunities = [
+            r for r in results
+            if r.symbol not in current_symbols
+            and r.symbol not in self._blacklist
+            and r.symbol not in self._pnl_ban_until
+            and r.symbol not in self._removed_cooldown
+            and r.actionable_proximity >= min_proximity
+            and r.score >= min_score
+            and r.vol_24h >= min_vol
+        ]
+
+        if not opportunities:
+            n_non_active = sum(1 for r in results if r.symbol not in current_symbols)
+            best_non_active = max(
+                (r for r in results if r.symbol not in current_symbols),
+                key=lambda r: r.actionable_proximity,
+                default=None,
+            )
+            best_info = (
+                f"best={best_non_active.symbol} actP={best_non_active.actionable_proximity:.0f} "
+                f"score={best_non_active.score:.1f}"
+                if best_non_active else "none"
+            )
+            logger.info(
+                f"🎯 Opportunity scan: no high-proximity opportunities "
+                f"(threshold={min_proximity:.0f}, checked {n_non_active} non-active, "
+                f"{best_info})"
+            )
+            return None
+
+        # 4. Score current trial symbols (from the same scan)
+        trial_scores = {}
+        for sym in trial_symbols:
+            scan_result = next((r for r in results if r.symbol == sym), None)
+            trial_scores[sym] = scan_result.score if scan_result else 0.0
+
+        # Sort trials worst-first (candidates for removal)
+        worst_trials = sorted(trial_symbols, key=lambda s: trial_scores.get(s, 0))
+
+        # 5. Match opportunities with worst trials
+        added = set()
+        removed = set()
+        swaps = 0
+
+        for opp in sorted(opportunities, key=lambda r: r.score, reverse=True):
+            if swaps >= max_swaps or not worst_trials:
+                break
+
+            worst_sym = worst_trials[0]
+            worst_score = trial_scores.get(worst_sym, 0)
+
+            # Only swap if opportunity is significantly better
+            if opp.score > worst_score + min_score_advantage:
+                worst_trials.pop(0)
+                added.add(opp.symbol)
+                removed.add(worst_sym)
+                swaps += 1
+                logger.info(
+                    f"  🎯 Opportunity swap: {worst_sym} (score={worst_score:.1f}) "
+                    f"→ {opp.symbol} (score={opp.score:.1f}, "
+                    f"actP={opp.actionable_proximity:.0f}, "
+                    f"conv={opp.convergence_score:.0f})"
+                )
+
+        if not added:
+            logger.info(
+                f"🎯 Opportunity scan: {len(opportunities)} opportunities found but "
+                f"none beats current trials by >{min_score_advantage:.0f}pts"
+            )
+            return None
+
+        # 6. Apply the swap
+        score_map = {r.symbol: r.score for r in results}
+        new_list = sorted((current_symbols - removed) | added)
+
+        # Add removed symbols to cooldown
+        now = datetime.now()
+        cooldown_hours = getattr(rot_cfg, 'removed_cooldown_hours', 3.0)
+        for sym in removed:
+            self._removed_cooldown[sym] = now
+
+        await self._apply_rotation(
+            new_list=new_list,
+            removed=removed,
+            added=added,
+            symbol_states=symbol_states,
+            ws_handler=ws_handler,
+            score_map=score_map,
+            signal_tracker=signal_tracker,
+        )
+
+        logger.info(
+            f"🎯 Opportunity scan complete: {len(added)} swaps | "
+            f"out={sorted(removed)} | in={sorted(added)}"
+        )
+
+        return list(added)

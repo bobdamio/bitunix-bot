@@ -4,7 +4,9 @@ Manages position state: WS callbacks, periodic sync, balance tracking.
 """
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 from typing import Dict, Optional
 
 from .models import SymbolState, BotState, TradeDirection
@@ -47,6 +49,7 @@ class PositionManager:
         self.trade_history = trade_history or TradeHistory()
         self._strategy = strategy_engine  # set after construction via set_strategy()
         self._telegram = None  # set after construction via set_telegram()
+        self._open_positions_path = Path("data/open_positions.json")
 
     def set_telegram(self, telegram_bot) -> None:
         """Set Telegram bot reference for close notifications."""
@@ -57,6 +60,37 @@ class PositionManager:
     def set_strategy(self, strategy_engine) -> None:
         """Set back-reference to strategy engine (for loss cooldown)."""
         self._strategy = strategy_engine
+
+    # ==================== Persistent Open Positions ====================
+
+    def _load_open_positions(self) -> dict:
+        """Load persisted open position data (original_risk etc.)."""
+        try:
+            if self._open_positions_path.exists():
+                return json.loads(self._open_positions_path.read_text())
+        except Exception as e:
+            logger.warning(f"Could not load open_positions.json: {e}")
+        return {}
+
+    def save_open_position(self, position_id: str, data: dict) -> None:
+        """Persist position data for restart recovery."""
+        try:
+            positions = self._load_open_positions()
+            positions[str(position_id)] = data
+            self._open_positions_path.parent.mkdir(parents=True, exist_ok=True)
+            self._open_positions_path.write_text(json.dumps(positions, indent=2))
+        except Exception as e:
+            logger.warning(f"Could not save open_positions.json: {e}")
+
+    def remove_open_position(self, position_id: str) -> None:
+        """Remove closed position from persistent storage."""
+        try:
+            positions = self._load_open_positions()
+            if str(position_id) in positions:
+                del positions[str(position_id)]
+                self._open_positions_path.write_text(json.dumps(positions, indent=2))
+        except Exception as e:
+            logger.warning(f"Could not update open_positions.json: {e}")
 
     # ==================== Startup Sync ====================
 
@@ -106,6 +140,10 @@ class PositionManager:
                 logger.info(f"🔍 [SYNC] Parsed TP/SL map: {existing_tpsl}")
             except Exception as e:
                 logger.warning(f"Could not fetch existing TP/SL orders: {e}")
+
+            persisted = self._load_open_positions()
+            if persisted:
+                logger.info(f"🔍 [SYNC] Loaded persisted positions: {list(persisted.keys())}")
 
             for pos in positions:
                 symbol = pos.get("symbol", "")
@@ -165,14 +203,32 @@ class PositionManager:
                         state.partial_tp_done = False
                         state.trailing_state = "breakeven"
                         state.trailing_sl_price = sl_price
-                        # Restore original_risk from TP distance
-                        risk = abs(tp_price - entry_price) / self.tpsl_calculator.config.min_rr
+                        # Restore original_risk: prefer persisted value, fall back to TP-based
+                        saved = persisted.get(position_id, {})
+                        if saved.get("original_risk"):
+                            risk = saved["original_risk"]
+                            logger.info(
+                                f"📊 [SYNC] {symbol}: restored original_risk={risk:.6f} from persistence"
+                            )
+                        else:
+                            risk = abs(tp_price - entry_price) / self.tpsl_calculator.config.force_close_at_r
+                            logger.info(
+                                f"📊 [SYNC] {symbol}: estimated original_risk={risk:.6f} from TP distance "
+                                f"(TP={tp_price:.4f}, force_close_at_r={self.tpsl_calculator.config.force_close_at_r})"
+                            )
                         logger.info(
                             f"📊 [SYNC] {symbol}: SL in profit (Phase 2+) "
                             f"(SL={sl_price:.4f}, TP={tp_price:.4f}) — "
                             f"partial TP will fire on next tick if not yet done"
                         )
                     else:
+                        # SL not in profit — use persisted risk if available
+                        saved = persisted.get(position_id, {})
+                        if saved.get("original_risk"):
+                            risk = saved["original_risk"]
+                            logger.info(
+                                f"📊 [SYNC] {symbol}: restored original_risk={risk:.6f} from persistence"
+                            )
                         logger.info(
                             f"📊 [SYNC] {symbol}: using exchange TP/SL "
                             f"(TP={tp_price:.4f}, SL={sl_price:.4f})"
@@ -651,6 +707,10 @@ class PositionManager:
 
     def _clear_position_state(self, state) -> None:
         """Clear all position-related state fields for a symbol."""
+        # Remove from persistent storage
+        pos_id = (state.current_order or {}).get("position_id")
+        if pos_id:
+            self.remove_open_position(pos_id)
         state.has_position = False
         state.active_fvg = None
         state.current_order = None
@@ -790,7 +850,8 @@ class PositionManager:
             if balance is None:
                 logger.warning("⚠️ Balance sync skipped: API unreachable")
                 return
-            self.state.balance = balance.available
-            logger.info(f"💰 Balance synced: ${balance.available:.2f}")
+            self.state.balance = balance.equity
+            self.state.available = balance.available
+            logger.info(f"💰 Equity synced: ${balance.equity:.2f} (available: ${balance.available:.2f})")
         except Exception as e:
             logger.error(f"Failed to sync balance: {e}")

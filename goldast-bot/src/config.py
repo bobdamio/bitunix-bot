@@ -29,6 +29,7 @@ class FVGConfig:
     entry_zone_min: float = 0.5
     entry_zone_max: float = 0.8
     min_gap_percent: float = 0.0010
+    min_gap_atr_mult: float = 0.3      # Min gap must be ≥ N×ATR (0 = disabled, use only %)
     max_active_fvgs: int = 5
     lookback_candles: int = 50
     min_volume_ratio: float = 1.2     # Minimum volume ratio on FVG candle
@@ -39,6 +40,7 @@ class FVGConfig:
     max_zone_distance: float = 0.015  # 1.5% — expire FVGs farther than this from price
     max_entry_distance: float = 0.015 # 1.5% — sliding window proximity filter
     ifvg_threshold_pct: float = 0.5   # IFVG violation threshold %
+    impulse_body_ratio: float = 0.5   # Min body/range ratio for impulse candle strength factor (0.0 = disabled)
 
 
 @dataclass
@@ -58,9 +60,14 @@ class TPSLConfig:
     trailing_breakeven_at_r: float = 1.0   # Phase 2: move SL to BE at 1.0R
     trailing_be_lock_r: float = 0.25       # BE SL = entry + 0.25R
     trailing_runner_at_r: float = 2.0      # Phase 3: activate runner at 2.0R
-    trailing_runner_sl_distance_r: float = 1.0  # Runner SL = price - 1.0R
+    trailing_be_trail_offset_r: float = 0.8    # Progressive BE: SL = profit - offset (breathing room)
+    trailing_runner_sl_distance_r: float = 2.5  # Runner SL = price - 2.5R
     trailing_runner_tp_distance_r: float = 1.5  # Runner TP = price + 1.5R
     trailing_step_r: float = 0.3           # Min SL move for API call (hysteresis)
+    # Trailing tightening — gradually reduce trail distance as profit grows
+    trailing_tighten_at_r: float = 5.0     # At 50% TP: trail reaches mid_distance
+    trailing_tighten_min_distance_r: float = 1.0  # Trail distance at tighten_at_r
+    trailing_tighten_final_distance_r: float = 0.5  # Trail distance at force_close_at_r
     # Partial TP
     partial_tp_enabled: bool = True
     partial_tp_percent: float = 0.5        # Close 50% at 1R
@@ -229,6 +236,7 @@ class TrendConfig:
     # BTC market leader filter — nerf counter-BTC trades
     btc_leader_enabled: bool = True   # Use BTC trend as market direction leader
     btc_leader_nerf_multiplier: float = 2.0  # Multiply threshold for counter-BTC direction
+    btc_leader_boost_divisor: float = 1.5    # Divide threshold for with-BTC direction
     # Trend direction flip — flip FVG direction to match strong 1h trend instead of blocking
     trend_flip_enabled: bool = False
     trend_flip_threshold: float = 0.35  # Score must exceed this for flip
@@ -245,6 +253,32 @@ class TrendConfig:
     score_weight_slope: float = 0.20       # EMA slope weight
     strong_trend_multiplier: float = 2.0   # Threshold × this = "STRONG" label
     trend_rescan_distance: float = 0.005   # Mid-tick FVG rescan distance (0.5%)
+    # === BOS (Break of Structure) Filter ===
+    bos_enabled: bool = False         # Require BOS confirmation before entry
+    bos_soft_mode: bool = False       # Soft mode: reduce size instead of blocking
+    bos_max_age_candles: int = 20     # BOS must be within last N 15m candles
+    bos_min_hold_candles: int = 3      # BOS must hold direction for N candles before trusting
+    bos_direction_override: bool = False  # BOS determines trade direction (BULLISH→LONG, BEARISH→SHORT)
+    # === HTF (1h) FVG Zone Confluence ===
+    htf_fvg_enabled: bool = False            # Require 1h FVG zone confluence
+    htf_soft_mode: bool = False              # Soft mode: reduce size instead of blocking
+    htf_fvg_min_gap_percent: float = 0.001   # Min gap % for 1h FVG detection
+    htf_fvg_max_zones: int = 10              # Max 1h FVG zones to track per symbol
+    htf_fvg_strength_bonus: float = 0.15     # Bonus to FVG strength when confluent with 1h zone
+    # Soft mode sizing
+    soft_mode_size_mult: float = 0.5         # Position size mult when BOS/HTF missing
+    confluence_bonus_mult: float = 1.25      # Position size mult when both BOS+HTF confirm
+    # === Exhaustion Reversal Detection ===
+    exhaustion_enabled: bool = True          # Detect 3+ consecutive strong candles for reversal
+    exhaustion_min_candles: int = 3           # Min consecutive strong candles to trigger
+    exhaustion_body_atr_ratio: float = 0.5   # Each candle body must be > 0.5× ATR
+    exhaustion_boost_mult: float = 1.5       # Position size boost for reversal entries
+    # === Liquidity Sweep Filter ===
+    sweep_enabled: bool = False              # Require recent liquidity sweep before entry
+    sweep_soft_mode: bool = True             # Soft mode: reduce size instead of blocking
+    sweep_max_age_candles: int = 10          # Sweep must be within last N 15m candles
+    sweep_size_mult: float = 0.5             # Position size mult when no sweep (soft mode)
+    sweep_bonus_mult: float = 1.25           # Position size bonus when sweep confirmed
 
 
 @dataclass
@@ -262,12 +296,35 @@ class RotationConfig:
     max_losing_trades: int = 3      # Force-remove after N consecutive losses
     pnl_ban_enabled: bool = True    # Enable 24h PnL-based ban for worst rotation symbol
     pnl_ban_hours: int = 24         # Ban duration for worst-PnL rotation symbol
+    pnl_ban_threshold: float = -2.0  # Ban any rotation symbol with PnL below this ($)
+    removed_cooldown_hours: float = 3.0  # Removed symbols can't return for N hours
+    pnl_penalty_per_dollar: float = 5.0  # Score penalty per $1 negative PnL
+    pnl_bonus_per_dollar: float = 3.0   # Score bonus per $1 positive PnL
+    pnl_bonus_cap: float = 15.0         # Max bonus points (prevents score inflation)
     # Proven symbol promotion thresholds
     proven_min_pnl: float = 0.50    # Min net PnL ($) to promote symbol to "proven"
     proven_min_trades: int = 2      # Min trades to qualify as proven
+    proven_min_wr: float = 40.0     # Min WR% to promote to proven
+    # Trial symbol restrictions (non-proven, non-core)
+    trial_min_fill: float = 0.30            # Require 30% zone fill for trial (vs 15% for proven)
+    trial_require_confluence: bool = True   # Trial symbols need BOS+HTF (no soft mode)
+    trial_max_losing_trades: int = 1        # Remove trial after 1st loss — fast fail
+    trial_size_multiplier: float = 0.5      # Trial symbols trade at 50% size (unproven = less risk)
     # Signal pipeline ban (fast 2h check)
     signal_ban_min_active_hours: float = 8.0   # Symbol must be active this long before ban
     signal_ban_no_hit_hours: float = 8.0       # Ban if no zone hit for this many hours
+    # Proven benching — temporarily free slots from proven symbols far from zones
+    proven_bench_min_proximity: float = 30.0   # Bench proven if actionable_proximity < this
+    # Cheap coin bonus — prioritize low-price coins (better FVG performance)
+    cheap_coin_threshold: float = 0.10         # Coins below this price get bonus score
+    cheap_coin_bonus: float = 8.0              # Bonus points for cheap coins
+    # Opportunity scanner — fast market-wide proximity check every 15 min
+    opportunity_scan_enabled: bool = True       # Enable frequent opportunity scanning
+    opportunity_scan_top_n: int = 50            # Scan top N symbols by volume
+    opportunity_scan_candles: int = 100         # Fewer candles for faster scan
+    opportunity_min_proximity: float = 70.0     # Min actionable proximity to trigger swap
+    opportunity_max_swaps: int = 2              # Max symbol swaps per scan cycle
+    opportunity_min_score_advantage: float = 10.0  # Min score advantage over worst trial
 
 
 @dataclass
@@ -279,10 +336,14 @@ class RiskConfig:
     symbol_max_consecutive_losses: int = 3     # Ban symbol after N consecutive losses
     symbol_loss_ban_seconds: int = 86400       # Ban duration for rotation symbols (24 hours)
     core_symbol_loss_ban_seconds: int = 3600   # Ban duration for core symbols (1 hour)
+    # Global consecutive loss pause
+    global_max_consecutive_losses: int = 4     # Pause ALL trading after N consecutive losses
+    global_loss_pause_seconds: int = 1800      # Pause duration (30 min)
     # Direction nerfing (raise threshold after consecutive directional losses)
-    direction_nerf_consecutive: int = 3        # N consecutive same-direction losses → nerf
-    direction_nerf_multiplier: float = 3.0     # Multiply entry threshold by this
-    direction_nerf_duration_seconds: int = 1800  # Nerf timeout (30 min)
+    direction_nerf_window: int = 5              # Look at last N trades per direction
+    direction_nerf_net_pnl_threshold: float = -2.0  # Block if net PnL < threshold over window
+    direction_nerf_duration_seconds: int = 3600  # Block timeout (1 hour)
+    direction_nerf_multiplier: float = 3.0     # Threshold multiplier (legacy fallback)
 
 
 @dataclass
@@ -290,6 +351,8 @@ class MultiSymbolConfig:
     max_concurrent_positions: int = 3
     position_per_symbol: int = 1
     max_same_direction: int = 2  # Max positions in same direction
+    correlation_guard_enabled: bool = True  # Block correlated symbols in same direction
+    max_correlated_same_dir: int = 1       # Max positions in same correlation group + direction
 
 
 @dataclass

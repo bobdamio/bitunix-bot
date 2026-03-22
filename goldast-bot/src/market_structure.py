@@ -43,15 +43,40 @@ class MarketStructure:
         
         self.last_bos_price: float = 0.0
         self.last_bos_time: int = 0
+        self.last_bos_direction: TrendDirection = TrendDirection.NEUTRAL
+        self._candles_since_bos: int = 9999  # Large default = no recent BOS
+        self._candles_since_bos_change: int = 9999  # Candles since BOS direction changed
+        self._prev_bos_direction: TrendDirection = TrendDirection.NEUTRAL  # Previous BOS direction (for stability)
+        self._total_candles_seen: int = 0
         
         # Range tracking
         self.range_high: float = 0.0
         self.range_low: float = 0.0
 
+    def warmup(self, candles: List[Candle]) -> None:
+        """Warm up BOS state from historical candles.
+
+        Replays candles progressively so that swing points and BOS events
+        are detected exactly as if they had arrived one-by-one via websocket.
+        """
+        if len(candles) < 5:
+            return
+        for end in range(5, len(candles) + 1):
+            self.update(candles[:end])
+        logger.info(
+            f"🏗️ {self.symbol} BOS warmup: {len(candles)} candles → "
+            f"highs={len(self.swing_highs)} lows={len(self.swing_lows)} "
+            f"{self.get_bos_info()}"
+        )
+
     def update(self, candles: List[Candle]) -> None:
         """Update structure with latest candles."""
         if len(candles) < 5:
             return
+
+        self._total_candles_seen += 1
+        self._candles_since_bos += 1
+        self._candles_since_bos_change += 1
 
         # 1. Detect new Fractals (Swing Points)
         # We look at the candle at index -3 (middle of 5)
@@ -110,6 +135,11 @@ class MarketStructure:
                 self.trend = TrendDirection.BULLISH
                 self.last_bos_price = last_high.price
                 self.last_bos_time = timestamp
+                self.last_bos_direction = TrendDirection.BULLISH
+                if self._prev_bos_direction != TrendDirection.BULLISH:
+                    self._candles_since_bos_change = 0
+                    self._prev_bos_direction = TrendDirection.BULLISH
+                self._candles_since_bos = 0
                 logger.debug(f"🚀 BOS BULLISH on {self.symbol} @ {current_price} (broke {last_high.price})")
 
         # Check Bearish BOS (Break of recent Swing Low)
@@ -122,6 +152,11 @@ class MarketStructure:
                 self.trend = TrendDirection.BEARISH
                 self.last_bos_price = last_low.price
                 self.last_bos_time = timestamp
+                self.last_bos_direction = TrendDirection.BEARISH
+                if self._prev_bos_direction != TrendDirection.BEARISH:
+                    self._candles_since_bos_change = 0
+                    self._prev_bos_direction = TrendDirection.BEARISH
+                self._candles_since_bos = 0
                 logger.debug(f"🔻 BOS BEARISH on {self.symbol} @ {current_price} (broke {last_low.price})")
 
     def get_premium_discount(self, current_price: float) -> Tuple[str, float]:
@@ -139,3 +174,99 @@ class MarketStructure:
         
         zone = "PREMIUM" if position > 0.5 else "DISCOUNT"
         return zone, position
+
+    def is_bos_recent(self, max_age_candles: int = 20) -> bool:
+        """Check if a BOS event happened within the last N candles."""
+        return self._candles_since_bos <= max_age_candles
+
+    def is_bos_stable(self, min_hold_candles: int = 3) -> bool:
+        """Check if BOS direction has been stable (unchanged) for at least N candles.
+        
+        Prevents entering on flip-flop BOS signals that reverse within minutes.
+        A BOS that just changed direction (< min_hold_candles ago) is considered unstable.
+        """
+        return self._candles_since_bos_change >= min_hold_candles
+
+    def is_bos_aligned(self, direction: str, max_age_candles: int = 20) -> bool:
+        """Check if recent BOS aligns with trade direction.
+        
+        LONG trade requires BULLISH BOS (price broke above swing high).
+        SHORT trade requires BEARISH BOS (price broke below swing low).
+        """
+        if not self.is_bos_recent(max_age_candles):
+            return False
+        if direction == "LONG":
+            return self.last_bos_direction == TrendDirection.BULLISH
+        elif direction == "SHORT":
+            return self.last_bos_direction == TrendDirection.BEARISH
+        return False
+
+    def get_bos_info(self) -> str:
+        """Get formatted BOS status string for logging."""
+        if self._candles_since_bos > 999:
+            return "BOS:none"
+        stable = "stable" if self._candles_since_bos_change >= 3 else f"unstable({self._candles_since_bos_change}c)"
+        return (
+            f"BOS:{self.last_bos_direction.value}"
+            f"({self._candles_since_bos}c ago)"
+            f"@{self.last_bos_price:.4f}"
+            f"[{stable}]"
+        )
+
+    # ==================== Liquidity Sweep Detection ====================
+
+    def check_liquidity_sweep(
+        self,
+        candles: List[Candle],
+        direction: str,
+        max_age_candles: int = 10,
+    ) -> Tuple[bool, str]:
+        """Check if a recent liquidity sweep occurred that supports the trade direction.
+
+        A sweep happens when price pierces a swing point but closes back on the
+        original side — indicating stop-hunt / liquidity grab followed by reversal.
+
+        LONG entry: price swept BELOW a swing low (took sell-side liquidity) then
+                    closed back above it. Institutions grabbed stops, now likely to push up.
+
+        SHORT entry: price swept ABOVE a swing high (took buy-side liquidity) then
+                     closed back below it. Institutions grabbed stops, now likely to push down.
+
+        Args:
+            candles: Recent candle data.
+            direction: "LONG" or "SHORT".
+            max_age_candles: Look back this many candles for sweeps.
+
+        Returns:
+            (sweep_detected, info_string)
+        """
+        if len(candles) < 3:
+            return False, "insufficient data"
+
+        lookback = min(max_age_candles, len(candles))
+
+        if direction == "LONG":
+            # Look for sell-side sweep: wick below swing low, close above
+            for sp in reversed(self.swing_lows):
+                if sp.is_broken:
+                    continue
+                for i in range(len(candles) - lookback, len(candles)):
+                    c = candles[i]
+                    # Wick pierced below swing low but candle closed above it
+                    if c.low < sp.price and c.close > sp.price:
+                        return True, f"sweep LOW@{sp.price:.4f} (wick={c.low:.4f} close={c.close:.4f})"
+            return False, "no sell-side sweep"
+
+        elif direction == "SHORT":
+            # Look for buy-side sweep: wick above swing high, close below
+            for sp in reversed(self.swing_highs):
+                if sp.is_broken:
+                    continue
+                for i in range(len(candles) - lookback, len(candles)):
+                    c = candles[i]
+                    # Wick pierced above swing high but candle closed below it
+                    if c.high > sp.price and c.close < sp.price:
+                        return True, f"sweep HIGH@{sp.price:.4f} (wick={c.high:.4f} close={c.close:.4f})"
+            return False, "no buy-side sweep"
+
+        return False, "unknown direction"

@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple
 
 from .models import Candle, FVG, TradeDirection
 from .config import TPSLConfig
+from . import fmt_price
 
 
 logger = logging.getLogger(__name__)
@@ -175,24 +176,18 @@ class TPSLCalculator:
                 f"(zone={fvg.bottom:.4f}-{fvg.top:.4f}, entry={entry_price:.4f}) — using R:R floor"
             )
 
-        # R:R floor: TP must be at least min_rr × SL distance
-        rr_tp_distance = risk * self.config.min_rr
+        # Initial TP = force_close_at_r × SL distance (safety net on exchange).
+        # The bot's 3-phase trailing system controls all real exits.
+        # Setting TP far away prevents the exchange from closing the position
+        # before the trailing system can activate (race condition fix).
+        safety_tp_distance = risk * self.config.force_close_at_r
+        tp_distance = max(fvg_tp_distance, safety_tp_distance)
 
-        # Primary TP = max(FVG opposite edge, min_rr floor)
-        # If the FVG zone is wide → zone edge gives good R:R automatically.
-        # If entry is deep into zone (fill > 50%) or zone is narrow → R:R floor kicks in.
-        tp_distance = max(fvg_tp_distance, rr_tp_distance)
-
-        if fvg_tp_distance >= rr_tp_distance:
-            logger.info(
-                f"📐 FVG TP: zone edge target {fvg_tp_distance/entry_price*100:.3f}% "
-                f"≥ R:R floor {rr_tp_distance/entry_price*100:.3f}% → using zone edge"
-            )
-        else:
-            logger.info(
-                f"📐 FVG TP: zone edge {fvg_tp_distance/entry_price*100:.3f}% "
-                f"< R:R floor {rr_tp_distance/entry_price*100:.3f}% → extended to {self.config.min_rr}R"
-            )
+        logger.info(
+            f"📐 Initial TP: {tp_distance/entry_price*100:.3f}% "
+            f"(safety={safety_tp_distance/entry_price*100:.3f}% @ {self.config.force_close_at_r}R, "
+            f"FVG edge={fvg_tp_distance/entry_price*100:.3f}%) — trailing controls actual exit"
+        )
 
         # ATR floor: TP must be at least 1×ATR
         tp_floor = atr * self.config.tp_min_atr_mult
@@ -223,8 +218,7 @@ class TPSLCalculator:
             )
             tp_distance = min_tp_distance
 
-        # Cap TP at max_tp_distance_pct (configurable, default 2.5%)
-        # Audit fix: set to 0.80% to match real 15m FVG bounce distances
+        # Cap TP at max_tp_distance_pct (configurable, default 10%)
         max_tp_pct = self.config.max_tp_distance_pct / 100.0
         max_tp_distance = entry_price * max_tp_pct
         if tp_distance > max_tp_distance:
@@ -234,19 +228,16 @@ class TPSLCalculator:
             )
             tp_distance = max_tp_distance
 
-        # After TP cap: if R:R < min_rr, shrink SL to restore ratio.
-        # SL = TP / min_rr preserves risk management even with tight TP cap.
-        required_sl = tp_distance / self.config.min_rr
-        if risk > required_sl:
+        # After TP cap: if R:R drops, keep structural SL but log the reduced R:R.
+        # CHANGED: no longer tightening SL — compressed SL gets hit by normal volatility.
+        # The structural SL (zone edge + buffer) is correct; accept lower R:R at cap.
+        actual_rr = tp_distance / risk if risk > 0 else 0
+        if actual_rr < self.config.force_close_at_r:
             logger.info(
-                f"📐 SL tightened to restore R:R: {risk/entry_price*100:.3f}% → "
-                f"{required_sl/entry_price*100:.3f}% (TP={tp_distance/entry_price*100:.3f}% / min_rr={self.config.min_rr})"
+                f"📐 Initial TP capped: {actual_rr:.2f}R "
+                f"(requested {self.config.force_close_at_r}R, TP={tp_distance/entry_price*100:.3f}%, "
+                f"SL={risk/entry_price*100:.3f}% — max_tp_distance_pct limit)"
             )
-            risk = required_sl
-            if fvg.direction == TradeDirection.LONG:
-                sl_price = entry_price - risk
-            else:
-                sl_price = entry_price + risk
 
         if fvg.direction == TradeDirection.LONG:
             tp_price = entry_price + tp_distance
@@ -268,9 +259,9 @@ class TPSLCalculator:
 
         logger.info(
             f"📊 TP/SL [{fvg.symbol} {fvg.direction.value}]: "
-            f"Entry=${entry_price:,.2f}  SL=${sl_price:,.2f} ({risk/entry_price*100:.3f}%)  "
-            f"TP=${tp_price:,.2f} ({tp_distance/entry_price*100:.3f}%)  "
-            f"R:R={levels.risk_reward_ratio:.2f}:1  ATR=${atr:,.2f}"
+            f"Entry=${fmt_price(entry_price)}  SL=${fmt_price(sl_price)} ({risk/entry_price*100:.3f}%)  "
+            f"TP=${fmt_price(tp_price)} ({tp_distance/entry_price*100:.3f}%)  "
+            f"R:R={levels.risk_reward_ratio:.2f}:1  ATR=${fmt_price(atr)}"
         )
 
         return levels
@@ -299,14 +290,14 @@ class TPSLCalculator:
         atr = max(atr, entry_price * self.config.atr_floor_pct)
 
         sl_distance = atr * self.config.sl_min_atr_mult
-        tp_distance = sl_distance * self.config.min_rr
+        tp_distance = sl_distance * self.config.force_close_at_r
 
         # Commission-aware floor (same as main calculate)
         min_tp_usd = self.config.min_tp_usd
         min_tp_distance = entry_price * (min_tp_usd / self.config.fallback_notional_usd)
         if tp_distance < min_tp_distance:
             tp_distance = min_tp_distance
-            sl_distance = tp_distance / self.config.min_rr
+            sl_distance = tp_distance / self.config.force_close_at_r
 
         if direction == TradeDirection.LONG:
             sl_price = entry_price - sl_distance
@@ -315,10 +306,14 @@ class TPSLCalculator:
             sl_price = entry_price + sl_distance
             tp_price = entry_price - tp_distance
 
+        # Floor: prices must be positive
+        sl_price = max(sl_price, 0.0001)
+        tp_price = max(tp_price, 0.0001)
+
         logger.info(
             f"📊 TP/SL [sync fallback {direction.value}]: "
-            f"Entry=${entry_price:,.2f}  SL=${sl_price:,.2f}  TP=${tp_price:,.2f}  "
-            f"ATR=${atr:,.2f}"
+            f"Entry=${fmt_price(entry_price)}  SL=${fmt_price(sl_price)}  TP=${fmt_price(tp_price)}  "
+            f"ATR=${fmt_price(atr)}"
         )
         return tp_price, sl_price
 

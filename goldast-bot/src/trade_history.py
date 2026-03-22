@@ -22,6 +22,7 @@ CSV_FIELDS = [
     "entryPrice", "closePrice", "qty", "maxQty",
     "realizedPNL", "fee", "funding", "margin",
     "marginMode", "ctime", "mtime",
+    "opened_at", "closed_at",
 ]
 
 
@@ -53,11 +54,37 @@ class TradeHistory:
     def known_position_ids(self) -> Set[str]:
         return self._known_ids
 
+    @staticmethod
+    def _ms_to_iso(ms_val) -> str:
+        """Convert epoch-ms (int or str) to ISO datetime string, or '' on failure."""
+        try:
+            ts = int(ms_val)
+            if ts > 1e12:
+                ts = ts / 1000
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError, OSError):
+            return ""
+
     def record_trade(self, position_data: Dict[str, Any]) -> None:
-        """Save a closed position (raw exchange data)."""
+        """Save a closed position (raw exchange data).
+        
+        Enriches with human-readable timestamps:
+          opened_at  - from ctime (position creation)
+          closed_at  - from mtime (position close / modification)
+        """
         pid = str(position_data.get("positionId", ""))
         if pid in self._known_ids:
             return  # already recorded
+
+        # Enrich: add human-readable timestamp fields if missing
+        if "opened_at" not in position_data:
+            position_data["opened_at"] = self._ms_to_iso(
+                position_data.get("ctime", "")
+            )
+        if "closed_at" not in position_data:
+            position_data["closed_at"] = self._ms_to_iso(
+                position_data.get("mtime", "")
+            )
 
         self._known_ids.add(pid)
         self._trades.append(position_data)
@@ -86,6 +113,9 @@ class TradeHistory:
         pnls = [float(t.get("realizedPNL", 0)) for t in self._trades]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p <= 0]
+        # Date range
+        first_closed = self._trades[0].get("closed_at", "")
+        last_closed = self._trades[-1].get("closed_at", "")
         return {
             "total": len(self._trades),
             "wins": len(wins),
@@ -94,6 +124,80 @@ class TradeHistory:
             "total_pnl": round(sum(pnls), 4),
             "best": round(max(pnls), 4) if pnls else 0,
             "worst": round(min(pnls), 4) if pnls else 0,
+            "first_trade": first_closed,
+            "last_trade": last_closed,
+        }
+
+    def get_trades_for_date(self, date_str: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all trades closed on a specific date (YYYY-MM-DD).
+        
+        If date_str is None, returns today's trades.
+        """
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        
+        result = []
+        for t in self._trades:
+            closed = t.get("closed_at", "")
+            if not closed:
+                # Fallback: parse mtime
+                closed = self._ms_to_iso(t.get("mtime", ""))
+            if closed.startswith(date_str):
+                result.append(t)
+        return result
+
+    def get_daily_summary(self, date_str: Optional[str] = None) -> Dict[str, Any]:
+        """Get summary stats for a specific day.
+        
+        Returns dict with total, wins, losses, win_rate, total_pnl, fees,
+        net_pnl, per-symbol breakdown, and the date.
+        """
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        
+        trades = self.get_trades_for_date(date_str)
+        if not trades:
+            return {"date": date_str, "total": 0}
+        
+        pnls = [float(t.get("realizedPNL", 0)) for t in trades]
+        fees = [abs(float(t.get("fee", 0))) for t in trades]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        total_fees = sum(fees)
+        total_pnl = sum(pnls)
+        
+        # Per-symbol breakdown
+        sym_data: Dict[str, list] = {}
+        for t in trades:
+            sym = t.get("symbol", "?")
+            pnl = float(t.get("realizedPNL", 0))
+            fee = abs(float(t.get("fee", 0)))
+            sym_data.setdefault(sym, []).append({"pnl": pnl, "fee": fee})
+        
+        by_symbol = {}
+        for sym, items in sym_data.items():
+            s_pnls = [i["pnl"] for i in items]
+            s_fees = [i["fee"] for i in items]
+            s_wins = [p for p in s_pnls if p > 0]
+            by_symbol[sym] = {
+                "trades": len(items),
+                "pnl": round(sum(s_pnls), 4),
+                "fees": round(sum(s_fees), 4),
+                "net": round(sum(s_pnls) - sum(s_fees), 4),
+                "wins": len(s_wins),
+                "wr": round(len(s_wins) / len(items) * 100) if items else 0,
+            }
+        
+        return {
+            "date": date_str,
+            "total": len(trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / len(pnls) * 100, 1),
+            "total_pnl": round(total_pnl, 4),
+            "total_fees": round(total_fees, 4),
+            "net_pnl": round(total_pnl - total_fees, 4),
+            "by_symbol": by_symbol,
         }
 
     def get_symbol_pnl(self, lookback_hours: int = 72) -> Dict[str, Dict[str, Any]]:
@@ -211,6 +315,17 @@ class TradeHistory:
                 self._known_ids = {
                     str(t.get("positionId", "")) for t in self._trades
                 }
+                # Backfill opened_at / closed_at for old trades missing them
+                backfilled = 0
+                for t in self._trades:
+                    if "opened_at" not in t and t.get("ctime"):
+                        t["opened_at"] = self._ms_to_iso(t["ctime"])
+                        backfilled += 1
+                    if "closed_at" not in t and t.get("mtime"):
+                        t["closed_at"] = self._ms_to_iso(t["mtime"])
+                if backfilled:
+                    self._save_json()
+                    logger.info(f"📝 Backfilled timestamps for {backfilled} trades")
                 # Also load archived IDs to prevent duplicates
                 if self._archive_path.exists():
                     try:

@@ -283,6 +283,8 @@ class ExchangeAdapter:
         position_id: str,
         tp_price: Optional[float] = None,
         sl_price: Optional[float] = None,
+        current_price: Optional[float] = None,
+        direction: Optional[str] = None,
     ) -> bool:
         """Modify existing TP/SL. Falls back to set_position_tpsl if modify fails."""
         # Round to exchange precision
@@ -290,6 +292,23 @@ class ExchangeAdapter:
             tp_price = round_price(symbol, tp_price)
         if sl_price:
             sl_price = round_price(symbol, sl_price)
+
+        # Validate SL is on the correct side of current price (same as set_position_tpsl)
+        if sl_price and current_price and direction:
+            if direction == "SHORT" and sl_price <= current_price:
+                adjusted_sl = round_price(symbol, current_price * (1 + self.sl_correction_pct))
+                logger.warning(
+                    f"⚠️ Trailing SL validation: {symbol} SHORT SL=${sl_price:,.4f} <= "
+                    f"price=${current_price:,.4f} → adjusted to ${adjusted_sl:,.4f}"
+                )
+                sl_price = adjusted_sl
+            elif direction == "LONG" and sl_price >= current_price:
+                adjusted_sl = round_price(symbol, current_price * (1 - self.sl_correction_pct))
+                logger.warning(
+                    f"⚠️ Trailing SL validation: {symbol} LONG SL=${sl_price:,.4f} >= "
+                    f"price=${current_price:,.4f} → adjusted to ${adjusted_sl:,.4f}"
+                )
+                sl_price = adjusted_sl
 
         try:
             await self._api.modify_position_tpsl(
@@ -423,13 +442,14 @@ class ExchangeAdapter:
                 for item in data:
                     if isinstance(item, dict):
                         # Bitunix format: {time, open, high, low, close, quoteVol, baseVol}
+                        # Use baseVol (USDT value) to match WS candles which also use baseVol
                         candles.append(Candle(
                             timestamp=int(item.get("time", item.get("ts", item.get("t", 0)))),
                             open=float(item.get("open", item.get("o", 0))),
                             high=float(item.get("high", item.get("h", 0))),
                             low=float(item.get("low", item.get("l", 0))),
                             close=float(item.get("close", item.get("c", 0))),
-                            volume=float(item.get("quoteVol", item.get("vol", item.get("v", 0)))),
+                            volume=float(item.get("baseVol", item.get("quoteVol", item.get("vol", item.get("v", 0))))),
                         ))
                     elif isinstance(item, list) and len(item) >= 5:
                         candles.append(Candle.from_api_data(item))

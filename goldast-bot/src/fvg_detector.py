@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 from .models import Candle, FVG, TradeDirection, FVGType
 from .config import FVGConfig, LeverageConfig
 from . import fmt_price
+from .tpsl_calculator import TPSLCalculator
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,21 @@ class FVGDetector:
         self.config = config
         self.leverage_config = leverage_config
         self.ifvg_threshold_pct = config.ifvg_threshold_pct
+
+    def _compute_min_gap(self, candles: List[Candle], ref_price: float) -> float:
+        """
+        Compute effective minimum gap size in absolute price terms.
+        Uses ATR × min_gap_atr_mult when enough candles are available,
+        falling back to min_gap_percent × price.
+        Returns whichever is larger (stricter).
+        """
+        pct_floor = ref_price * self.config.min_gap_percent
+        atr_mult = self.config.min_gap_atr_mult
+        if atr_mult > 0 and len(candles) >= 15:
+            atr = TPSLCalculator.calculate_atr(candles, period=14)
+            if atr > 0:
+                return max(pct_floor, atr * atr_mult)
+        return pct_floor
     
     def detect_fvg(
         self,
@@ -54,9 +70,11 @@ class FVGDetector:
             f"(c1 H/L={c1.high:.2f}/{c1.low:.2f}, c3 H/L={c3.high:.2f}/{c3.low:.2f})"
         )
 
+        min_gap_abs = self._compute_min_gap(candles, c2.close)
+
         if bullish_gap > 0:
             gap_percent = bullish_gap / c2.close
-            if gap_percent >= self.config.min_gap_percent:
+            if bullish_gap >= min_gap_abs:
                 fvg = FVG(
                     symbol=symbol,
                     direction=TradeDirection.LONG,
@@ -79,7 +97,7 @@ class FVGDetector:
         bearish_gap = c1.low - c3.high
         if bearish_gap > 0:
             gap_percent = bearish_gap / c2.close
-            if gap_percent >= self.config.min_gap_percent:
+            if bearish_gap >= min_gap_abs:
                 fvg = FVG(
                     symbol=symbol,
                     direction=TradeDirection.SHORT,
@@ -117,6 +135,10 @@ class FVGDetector:
 
         candidates: List[FVG] = []
 
+        # Compute ATR once for the whole buffer (used for dynamic min gap)
+        # ref_price: use last close as representative price for % floor
+        min_gap_abs = self._compute_min_gap(candles, candles[-1].close)
+
         # Slide through all 3-candle windows (oldest to newest)
         for i in range(len(candles) - 2):
             c1, c2, c3 = candles[i], candles[i + 1], candles[i + 2]
@@ -125,7 +147,7 @@ class FVGDetector:
             bull_gap = c3.low - c1.high
             if bull_gap > 0:
                 gap_pct = bull_gap / c2.close
-                if gap_pct >= self.config.min_gap_percent:
+                if bull_gap >= min_gap_abs:
                     fvg = FVG(
                         symbol=symbol,
                         direction=TradeDirection.LONG,
@@ -150,7 +172,7 @@ class FVGDetector:
             bear_gap = c1.low - c3.high
             if bear_gap > 0:
                 gap_pct = bear_gap / c2.close
-                if gap_pct >= self.config.min_gap_percent:
+                if bear_gap >= min_gap_abs:
                     fvg = FVG(
                         symbol=symbol,
                         direction=TradeDirection.SHORT,
@@ -209,6 +231,19 @@ class FVGDetector:
         )
         return best
     
+    @staticmethod
+    def _impulse_ratio(candle: Candle) -> float:
+        """Return body/range ratio for a candle (0.0-1.0).
+
+        High ratio = impulse candle (large body, small wicks).
+        Low ratio = indecision (doji, spinning top).
+        """
+        candle_range = candle.high - candle.low
+        if candle_range <= 0:
+            return 0.0
+        body = abs(candle.close - candle.open)
+        return body / candle_range
+
     def _calculate_strength(
         self,
         fvg: FVG,
@@ -222,20 +257,19 @@ class FVGDetector:
         - Gap size (larger = stronger)
         - Volume on gap candle (higher = stronger)
         - Trend alignment
+        - Impulse candle quality (body/range ratio)
         """
         score = 0.0
         weights_total = 0.0
         
-        # Factor 1: Gap size (weight: 0.4)
+        # Factor 1: Gap size (weight: 0.3)
         # Larger gaps are more significant
         gap_score = min(fvg.gap_percent * 100, 1.0)  # Cap at 1% = max score
-        score += gap_score * 0.4
-        weights_total += 0.4
+        score += gap_score * 0.3
+        weights_total += 0.3
         
-        # Factor 2: Volume ratio (weight: 0.3)
+        # Factor 2: Volume ratio (weight: 0.25)
         # Compare gap candle volume to NEIGHBORING candles (not latest)
-        # Bug fix: old code used candles[-10:-1] which compared old FVG candle
-        # volume against latest candles — giving 0.02x for old FVGs
         gap_idx = fvg.candle_index if hasattr(fvg, 'candle_index') else len(candles) - 2
         # Take up to 5 candles before and after gap_candle (excluding gap itself)
         neighbor_start = max(0, gap_idx - 5)
@@ -249,35 +283,59 @@ class FVGDetector:
             volume_ratio = gap_candle.volume / avg_volume if avg_volume > 0 else 1.0
             fvg.volume_ratio = volume_ratio
             volume_score = min(volume_ratio / 2, 1.0)  # 2x avg volume = max score
-            score += volume_score * 0.3
-            weights_total += 0.3
+            score += volume_score * 0.25
+            weights_total += 0.25
         else:
             fvg.volume_ratio = 1.0  # Default to neutral when insufficient data
         
-        # Factor 3: Trend alignment (weight: 0.3)
+        # Factor 3: Trend alignment (weight: 0.25)
         # Check if FVG aligns with recent trend
         if len(candles) >= 20:
             trend_score = self._calculate_trend_alignment(fvg, candles)
-            score += trend_score * 0.3
-            weights_total += 0.3
+            score += trend_score * 0.25
+            weights_total += 0.25
+
+        # Factor 4: Impulse candle quality (weight: 0.20)
+        # Gap candle (c2) should be an impulse candle — large body, small wicks.
+        # Body/range ≥ impulse_body_ratio → full score.
+        # Dojis/spinning tops create weak, unreliable FVGs.
+        imp_ratio = self._impulse_ratio(gap_candle)
+        imp_threshold = self.config.impulse_body_ratio
+        if imp_threshold > 0:
+            # Scale: 0 at ratio=0, 1.0 at ratio≥threshold
+            impulse_score = min(imp_ratio / imp_threshold, 1.0)
+            score += impulse_score * 0.20
+            weights_total += 0.20
         
-        # Normalize to 0-1 range
+        # Normalize to 0-1 range (round to avoid float edge cases like 0.5999 < 0.60)
         final_score = score / weights_total if weights_total > 0 else 0.5
-        return min(max(final_score, 0.0), 1.0)
+        return round(min(max(final_score, 0.0), 1.0), 4)
     
     def _calculate_trend_alignment(
         self,
         fvg: FVG,
         candles: List[Candle],
     ) -> float:
-        """Calculate trend alignment score"""
+        """Calculate trend alignment score using candles around FVG formation time,
+        not the latest candles (which may be hours later for old sliding-window FVGs)."""
         if len(candles) < 20:
             return 0.5
         
-        # Simple trend: compare current price to 20-candle SMA
-        closes = [c.close for c in candles[-20:]]
+        # Use candles around FVG formation, not latest candles
+        gap_idx = fvg.candle_index if hasattr(fvg, 'candle_index') else len(candles) - 2
+        # Take up to 20 candles ending at the gap candle
+        end_idx = min(gap_idx + 1, len(candles))
+        start_idx = max(0, end_idx - 20)
+        context_candles = candles[start_idx:end_idx]
+        
+        if len(context_candles) < 10:
+            # Not enough context around formation — fall back to latest
+            context_candles = candles[-20:]
+        
+        # Simple trend: compare price at formation to 20-candle SMA
+        closes = [c.close for c in context_candles]
         sma_20 = sum(closes) / len(closes)
-        current_price = candles[-1].close
+        current_price = closes[-1]  # Price at FVG formation time
         
         # Calculate trend direction
         trend_bullish = current_price > sma_20
@@ -321,26 +379,28 @@ class FVGDetector:
             return False, "FVG violated (zone broken)"
         
         # --- Zone-edge proximity entry (anticipation) ---
-        # Enter when price is VERY CLOSE to the zone edge (within 0.05%).
-        # This catches near-touches where fill=0.0 due to floating point.
-        #   LONG FVG:  price just above zone.top, approaching from above
-        #   SHORT FVG: price just below zone.bottom, approaching from below  
-        # CRITICAL: tolerance must be very tight (0.05%) to avoid chasing.
-        # Old bug: 0.40% tolerance caused entries 0.35% outside zone → no edge.
+        # Enter when price is VERY CLOSE to the zone edge, approaching for a retest.
+        #   LONG FVG (support zone):  price just ABOVE zone.top, dropping toward zone
+        #                             → anticipate retest of bullish imbalance from above
+        #   SHORT FVG (resistance zone): price just BELOW zone.bottom, rising toward zone
+        #                             → anticipate retest of bearish imbalance from below
+        # CRITICAL: tolerance must be very tight to avoid chasing entries outside zones.
         edge_tolerance = self.config.edge_entry_tolerance
         if fvg.fill_percent == 0.0:
             if fvg.direction == TradeDirection.LONG:
-                # Bullish FVG: price approaching zone.top from above
+                # Bullish FVG: price just above zone.top, approaching the zone from above
+                # This is the correct direction — price drops into the FVG zone for a retest
                 if current_price > fvg.top:
                     dist_to_edge = (current_price - fvg.top) / fvg.top
                     if 0 < dist_to_edge <= edge_tolerance:
-                        return True, f"Zone-edge anticipation ({dist_to_edge*100:.3f}% above zone top)"
+                        return True, f"Zone-edge anticipation LONG ({dist_to_edge*100:.3f}% above zone top, approaching)"
             else:
-                # Bearish FVG: price approaching zone.bottom from below
+                # Bearish FVG: price just below zone.bottom, approaching the zone from below
+                # This is the correct direction — price rises into the FVG zone for a retest
                 if current_price < fvg.bottom:
                     dist_to_edge = (fvg.bottom - current_price) / fvg.bottom
                     if 0 < dist_to_edge <= edge_tolerance:
-                        return True, f"Zone-edge anticipation ({dist_to_edge*100:.3f}% below zone bottom)"
+                        return True, f"Zone-edge anticipation SHORT ({dist_to_edge*100:.3f}% below zone bottom, approaching)"
         
         # Standard fill-based entry
         if fvg.fill_percent < self.config.entry_zone_min:
@@ -470,9 +530,9 @@ class FVGDetector:
                                 created_at=datetime.now(),
                                 candle_index=i,
                                 gap_percent=gap_pct,
-                                strength=0.7,  # OBs get decent default strength
                                 volume_ratio=vol_ratio,
                             )
+                            best_ob.strength = self._calculate_strength(best_ob, candle, candles)
                             best_distance = distance
 
             # Check pivot HIGH (bearish OB)
@@ -515,9 +575,9 @@ class FVGDetector:
                                 created_at=datetime.now(),
                                 candle_index=i,
                                 gap_percent=gap_pct,
-                                strength=0.7,
                                 volume_ratio=vol_ratio,
                             )
+                            best_ob.strength = self._calculate_strength(best_ob, candle, candles)
                             best_distance = distance
 
         if best_ob:

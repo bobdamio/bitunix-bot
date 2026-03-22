@@ -106,6 +106,10 @@ class GoldastBot:
         self.rotation = SymbolRotation(self.exchange, self.config)
         self.rotation._config_path = self.config_path
         await self.rotation.fetch_all_symbol_info()
+
+        # Wire rotation to strategy engine for proven/trial symbol checks
+        self.strategy.set_rotation(self.rotation)
+
         # Update precision dicts from exchange data
         from . import exchange_adapter
         for sym in self.config.symbols:
@@ -230,6 +234,16 @@ class GoldastBot:
         for symbol in self.config.symbols:
             self.symbol_states[symbol] = SymbolState(symbol=symbol)
 
+        # Trade history (persistent storage)
+        self.trade_history = TradeHistory()
+
+        # Signal tracker — pipeline rotation (MUST be created BEFORE StrategyEngine)
+        self.signal_tracker = SignalTracker(data_dir="data")
+        # Activate only NEW symbols (never-seen) so persisted stats survive restarts
+        for sym in self.config.symbols:
+            if not self.signal_tracker.get_stats(sym):
+                self.signal_tracker.activate(sym)
+
         # Strategy engine (FVG detection + trade execution)
         self.strategy = StrategyEngine(
             config=self.config,
@@ -245,15 +259,6 @@ class GoldastBot:
             signal_tracker=self.signal_tracker,
         )
 
-        # Trade history (persistent storage)
-        self.trade_history = TradeHistory()
-
-        # Signal tracker — pipeline rotation
-        self.signal_tracker = SignalTracker(data_dir="data")
-        # Activate initial symbols so timers start from boot
-        for sym in self.config.symbols:
-            self.signal_tracker.activate(sym)
-
         # Position manager (state sync + WS callbacks)
         self.positions = PositionManager(
             exchange=self.exchange,
@@ -267,6 +272,9 @@ class GoldastBot:
 
         # Wire back-reference for loss cooldown tracking
         self.positions.set_strategy(self.strategy)
+        self.strategy.set_position_manager(self.positions)
+
+        # NOTE: rotation wired to strategy in start() after SymbolRotation is created
 
         # Initialize Telegram bot if enabled
         await self._init_telegram()
@@ -373,8 +381,9 @@ class GoldastBot:
         """Connect to exchange and WebSocket."""
         balance = await self.exchange.get_balance()
         if balance is not None:
-            self.state.balance = balance.available
-            logger.info(f"💰 Account balance: ${balance.available:.2f}")
+            self.state.balance = balance.equity
+            self.state.available = balance.available
+            logger.info(f"💰 Account equity: ${balance.equity:.2f} (available: ${balance.available:.2f})")
         else:
             logger.warning("⚠️ Could not fetch initial balance")
 
@@ -433,7 +442,8 @@ class GoldastBot:
 
         balance = await self.exchange.get_balance()
         if balance is not None:
-            self.state.balance = balance.available
+            self.state.balance = balance.equity
+            self.state.available = balance.available
 
         # Every 30s: manage trailing SL + partial TP
         await self.strategy.manage_open_positions()
@@ -452,7 +462,8 @@ class GoldastBot:
             await self.strategy.refresh_htf_trends()
 
         # Every ~1h (120 ticks × 30s): check if daily symbol rotation is due
-        if self._periodic_tick % 120 == 0 and self.rotation:
+        # Also run on tick 2 (startup) to populate symbols immediately
+        if (self._periodic_tick % 120 == 0 or self._periodic_tick == 2) and self.rotation:
             try:
                 new_symbols = await self.rotation.maybe_rotate(
                     symbol_states=self.symbol_states,
@@ -485,6 +496,24 @@ class GoldastBot:
             except Exception as e:
                 logger.error(f"Pipeline ban check error: {e}")
 
+        # Every ~15min (30 ticks × 30s): opportunity scan
+        # Scans wider market for symbols where price is RIGHT AT an FVG zone
+        # Hot-swaps cold trial symbols for high-proximity opportunities
+        # Offset by 15 ticks to not collide with full rotation tick
+        if self._periodic_tick % 30 == 15 and self.rotation:
+            try:
+                opp_symbols = await self.rotation.opportunity_scan(
+                    symbol_states=self.symbol_states,
+                    ws_handler=self.ws_handler,
+                    signal_tracker=self.signal_tracker,
+                )
+                if opp_symbols:
+                    await self.strategy.refresh_htf_trends()
+                    for sym in opp_symbols:
+                        await self._backfill_symbol(sym)
+            except Exception as e:
+                logger.error(f"Opportunity scan error: {e}")
+
         # Status log
         pos_info = []
         fvg_info = []
@@ -511,8 +540,9 @@ class GoldastBot:
             if self.symbol_states.get(s)
         }
 
+        avail = getattr(self.state, 'available', self.state.balance)
         logger.info(
-            f"📈 bal=${self.state.balance:.2f} | pos=[{pos_str}] | "
+            f"📈 eq=${self.state.balance:.2f} avl=${avail:.2f} | pos=[{pos_str}] | "
             f"fvg=[{fvg_str}] | prices={prices} | "
             f"trades={self.state.total_trades}"
         )
@@ -546,10 +576,12 @@ class GoldastBot:
             logger.info("📡 Pipeline: all symbols generating signals ✅")
             return
 
-        # Check which have open positions (protect those)
+        # Check which have open positions or are core (protect those)
+        pinned = self.rotation._pinned_symbols
         to_remove = [
             sym for sym in silent
-            if not self.symbol_states.get(sym, object()).has_position
+            if sym not in pinned
+            and not self.symbol_states.get(sym, object()).has_position
         ]
         if not to_remove:
             logger.info(f"📡 Pipeline: {len(silent)} silent but all have open positions — skipping")
@@ -560,9 +592,10 @@ class GoldastBot:
             f"{', '.join(sorted(to_remove))}"
         )
 
-        # Fast scan: top 50 symbols, 100 candles (quick)
+        # Fast scan: top symbols, 100 candles (quick)
+        scan_top_n = getattr(self.config.rotation, 'opportunity_scan_top_n', 50)
         scan_results = await self.rotation.scan_all_symbols(
-            top_n=50,
+            top_n=scan_top_n,
             candle_count=100,
             min_gap=self.config.fvg.min_gap_percent,
         )
