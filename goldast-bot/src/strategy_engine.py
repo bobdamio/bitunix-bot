@@ -2061,12 +2061,15 @@ class StrategyEngine:
                 state.has_position = False  # release reserved slot
                 state.current_order = None
 
-    # ==================== 3-Phase Trailing SL ====================
+    # ==================== Fixed 3R TP + BE Protection ====================
     #
-    # Phase 1 (Initial):    SL = ATR-based, TP = 10R (force_close_at_r)
-    # Phase 2 (Breakeven):  At ≥1R → SL = entry + 0.4R, progressive slide
-    # Phase 3 (Runner):     At ≥2.5R → SL trails 2.5R behind (clamped to never regress)
-    #                        At ≥5R (50% TP) → trail tightens from 2.5R → 1.0R
+    # Phase 1 (Initial):    SL = ATR-based, TP = 3R (exchange closes at 3R)
+    # Phase 2 (Breakeven):  At ≥1.5R → SL = entry + 0.05R (protect capital)
+    # Phase 3 (Runner):     DISABLED (runner_at=99R, never activates)
+    #
+    # Strategy: let winners hit 3R TP on exchange. No trailing interference.
+    # The trailing system produced 111 micro-BE exits ($0.14 avg) from 215 wins.
+    # Fixed 3R TP simulation: +$129 over 500 trades (+$6.13/day) vs -$77 with trailing.
     #
     # Phase transitions clamp SL to never lose locked profit.
 

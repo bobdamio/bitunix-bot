@@ -184,9 +184,9 @@ class TPSLCalculator:
         tp_distance = max(fvg_tp_distance, safety_tp_distance)
 
         logger.info(
-            f"📐 Initial TP: {tp_distance/entry_price*100:.3f}% "
-            f"(safety={safety_tp_distance/entry_price*100:.3f}% @ {self.config.force_close_at_r}R, "
-            f"FVG edge={fvg_tp_distance/entry_price*100:.3f}%) — trailing controls actual exit"
+            f"📐 TP: {tp_distance/entry_price*100:.3f}% "
+            f"(fixed={safety_tp_distance/entry_price*100:.3f}% @ {self.config.force_close_at_r}R, "
+            f"FVG edge={fvg_tp_distance/entry_price*100:.3f}%) — exchange closes at {self.config.force_close_at_r}R"
         )
 
         # ATR floor: TP must be at least 1×ATR
