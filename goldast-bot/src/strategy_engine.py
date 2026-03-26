@@ -1,6 +1,7 @@
 """
 GoldasT Bot v2 - Strategy Engine
-FVG/IFVG detection, entry condition checking, and trade execution.
+EMA crossover trend-following with ATR-based TP/SL.
+Replaces FVG-based signals (46% accuracy) with EMA(9)/EMA(21) crossover.
 """
 
 import asyncio
@@ -8,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, Optional, TYPE_CHECKING
 
-from .models import FVG, SymbolState, BotState, TradeDirection, OrderState
+from .models import FVG, FVGType, SymbolState, BotState, TradeDirection, OrderState
 from . import fmt_price
 from .fvg_detector import FVGDetector
 from .tpsl_calculator import TPSLCalculator
@@ -154,6 +155,11 @@ class StrategyEngine:
         # === HTF (1h) FVG Zones per symbol ===
         # {symbol: [FVG, ...]} — 1h FVG zones detected from hourly candles
         self._htf_fvg_zones: Dict[str, list] = {}
+
+        # === EMA Crossover Tracking ===
+        # Previous candle's EMA values for crossover detection
+        self._prev_ema9: Dict[str, float] = {}
+        self._prev_ema21: Dict[str, float] = {}
 
     def set_telegram(self, telegram_bot) -> None:
         """Set Telegram bot reference for trade notifications."""
@@ -826,23 +832,14 @@ class StrategyEngine:
             # Update market structure (BOS detection) on candle close
             self._update_market_structure(symbol)
 
-            asyncio.create_task(self._detect_fvg_on_close(symbol))
+            # === EMA Crossover Signal (replaces FVG detection) ===
+            # FVG signals had 46% direction accuracy over 500 trades = noise.
+            # EMA crossover follows actual trend direction = higher accuracy.
+            asyncio.create_task(self._check_ema_signal_on_close(symbol))
         else:
-            if state and state.active_fvg and not state.has_position:
-                asyncio.create_task(self._check_live_entry(symbol, msg.close))
-                # Mid-tick FVG rescan: if zone is far from price, try to find closer one
-                # Throttled: max once per 5 min per symbol to avoid expire-rescan loop
-                fvg = state.active_fvg
-                if fvg and fvg.fill_percent == 0.0:
-                    dist = abs(msg.close - fvg.mid_price) / msg.close
-                    if dist > self.config.trend.trend_rescan_distance:  # far away → maybe rescan
-                        now = datetime.now()
-                        last = self._last_entry_check_log.get(f"{symbol}_rescan")
-                        if not last or (now - last).total_seconds() > 300:
-                            self._last_entry_check_log[f"{symbol}_rescan"] = now
-                            asyncio.create_task(self._detect_fvg_on_close(symbol))
-            # Check trailing SL / partial TP on every tick for open positions
-            elif state and state.has_position and state.current_order:
+            # On live tick: manage trailing SL for open positions
+            # (No more FVG zone entry checking — EMA entries happen on candle close)
+            if state and state.has_position and state.current_order:
                 asyncio.create_task(self._check_trailing_on_tick(symbol, state))
 
     # ==================== FVG Detection ====================
@@ -937,6 +934,214 @@ class StrategyEngine:
                 f"📊 {symbol} scan: no FVG | "
                 f"bull_gap={bull_gap:.4f} bear_gap={bear_gap:.4f}"
             )
+
+    # ==================== EMA Crossover Signal ====================
+
+    async def _check_ema_signal_on_close(self, symbol: str) -> None:
+        """Detect EMA(9)/EMA(21) crossover on candle close and trigger entry.
+        
+        Replaces FVG-based signal generation. EMA crossover is a proven
+        trend-following approach with >50% directional accuracy on crypto.
+        FVG signals had only 46% accuracy over 500 trades.
+        
+        Signal: EMA(9) crosses EMA(21) → enter in crossover direction.
+        TP/SL: purely ATR-based (1.5 ATR stop, 3R target).
+        """
+        candles = self.ws_handler.get_candle_buffer(symbol)
+        if not candles or len(candles) < 25:
+            return
+
+        state = self.symbol_states.get(symbol)
+        if not state:
+            return
+
+        # Don't generate signals if we already have a position
+        if state.has_position:
+            return
+
+        # Don't generate signals if an order is pending
+        machine = self.order_manager.get_machine(symbol)
+        if machine and machine.ctx.state not in (OrderState.IDLE,):
+            return
+
+        closes = [c.close for c in candles]
+        current_price = closes[-1]
+
+        # Compute current EMAs
+        ema9 = self._ema(closes, 9)
+        ema21 = self._ema(closes, 21)
+
+        # Get previous EMAs
+        prev_ema9 = self._prev_ema9.get(symbol)
+        prev_ema21 = self._prev_ema21.get(symbol)
+
+        # Store for next candle
+        self._prev_ema9[symbol] = ema9
+        self._prev_ema21[symbol] = ema21
+
+        if prev_ema9 is None or prev_ema21 is None:
+            return  # First candle — need at least 2 to detect cross
+
+        # Detect crossover
+        direction = None
+        if prev_ema9 <= prev_ema21 and ema9 > ema21:
+            direction = TradeDirection.LONG   # Bullish crossover
+        elif prev_ema9 >= prev_ema21 and ema9 < ema21:
+            direction = TradeDirection.SHORT  # Bearish crossover
+
+        if direction is None:
+            return  # No crossover this candle
+
+        dir_str = direction.value
+        trend_info = self._get_trend_info(symbol)
+
+        # === RSI confirmation: skip overbought BUYs and oversold SELLs ===
+        rsi = self._rsi_cache.get(symbol)
+        rsi_ob = self.config.trend.rsi_overbought
+        rsi_os = self.config.trend.rsi_oversold
+        if rsi is not None:
+            if direction == TradeDirection.LONG and rsi > rsi_ob:
+                logger.info(
+                    f"🚫 EMA cross {symbol} LONG blocked — RSI={rsi:.1f} > {rsi_ob} (overbought)"
+                )
+                return
+            if direction == TradeDirection.SHORT and rsi < rsi_os:
+                logger.info(
+                    f"🚫 EMA cross {symbol} SHORT blocked — RSI={rsi:.1f} < {rsi_os} (oversold)"
+                )
+                return
+
+        # === Daily loss limit ===
+        max_daily_loss = self.state.balance * self.config.risk.max_daily_loss_percent / 100
+        if self.state.daily_pnl < 0 and abs(self.state.daily_pnl) >= max_daily_loss:
+            return
+
+        # === Global consecutive loss pause ===
+        if self._global_loss_pause_until:
+            if datetime.now() < self._global_loss_pause_until:
+                return
+            else:
+                self._global_loss_pause_until = None
+
+        # === Entry cooldown ===
+        last_win = self._last_win_time.get(symbol)
+        win_cooldown = self.config.cooldowns.win_cooldown_seconds
+        entry_cooldown = self.config.cooldowns.entry_cooldown_seconds
+        if last_win and state.last_entry_time and last_win >= state.last_entry_time:
+            effective_cooldown = win_cooldown
+        else:
+            effective_cooldown = entry_cooldown
+        if state.last_entry_time and effective_cooldown > 0:
+            elapsed = (datetime.now() - state.last_entry_time).total_seconds()
+            if elapsed < effective_cooldown:
+                return
+
+        # === Post-loss cooldown ===
+        loss_cooldown = self.config.cooldowns.loss_cooldown_seconds
+        last_loss = self._last_loss_time.get(symbol)
+        if last_loss and loss_cooldown > 0:
+            elapsed = (datetime.now() - last_loss).total_seconds()
+            if elapsed < loss_cooldown:
+                return
+
+        # === Global burst limiter ===
+        global_cd = self.config.cooldowns.global_entry_cooldown_seconds
+        if global_cd > 0 and self._last_global_entry_time:
+            elapsed = (datetime.now() - self._last_global_entry_time).total_seconds()
+            if elapsed < global_cd:
+                return
+
+        # === Max total positions ===
+        max_positions = self.config.multi_symbol.max_concurrent_positions
+        total_positions = sum(
+            1 for s, st in self.symbol_states.items()
+            if st.has_position
+        )
+        if total_positions >= max_positions:
+            logger.info(
+                f"🚫 EMA cross {symbol} {dir_str} blocked — "
+                f"{total_positions}/{max_positions} positions"
+            )
+            return
+
+        # === Per-symbol ban ===
+        ban_until = self._symbol_loss_ban_until.get(symbol)
+        if ban_until and datetime.now() < ban_until:
+            return
+
+        # === Max same-direction ===
+        max_same = self.config.multi_symbol.max_same_direction
+        same_dir_count = sum(
+            1 for s, st in self.symbol_states.items()
+            if st.has_position and st.current_order
+            and st.current_order.get('direction') == direction
+        )
+        if same_dir_count >= max_same:
+            return
+
+        # === Correlation guard ===
+        if self.config.multi_symbol.correlation_guard_enabled:
+            max_corr = self.config.multi_symbol.max_correlated_same_dir
+            sym_group = None
+            for grp_name, grp_symbols in CORRELATION_GROUPS.items():
+                if symbol in grp_symbols:
+                    sym_group = grp_name
+                    break
+            if sym_group:
+                grp_syms = CORRELATION_GROUPS[sym_group]
+                corr_count = sum(
+                    1 for s, st in self.symbol_states.items()
+                    if s != symbol and s in grp_syms
+                    and st.has_position and st.current_order
+                    and st.current_order.get('direction') == direction
+                )
+                if corr_count >= max_corr:
+                    return
+
+        # === Session/killzone filter ===
+        if self.config.session.enabled:
+            is_active, zone_name = self.config.session.is_killzone_now()
+            if not is_active:
+                return
+
+        # All filters passed — create virtual FVG and execute entry
+        atr = TPSLCalculator.calculate_atr(candles, period=self.config.trend.atr_period)
+
+        fvg = FVG(
+            symbol=symbol,
+            direction=direction,
+            top=current_price + atr * 0.01,
+            bottom=current_price - atr * 0.01,
+            created_at=datetime.now(),
+            candle_index=len(candles) - 1,
+            fvg_type=FVGType.BULLISH if direction == TradeDirection.LONG else FVGType.BEARISH,
+            gap_percent=0.0,
+            signal_source="ema",
+        )
+        fvg.strength = 0.5
+        fvg.entry_triggered = True
+
+        state.active_fvg = fvg
+
+        logger.info(
+            f"📊 EMA CROSS: {symbol} {dir_str} | "
+            f"EMA9={ema9:.6f} EMA21={ema21:.6f} | "
+            f"price={current_price:.6f} RSI={rsi:.1f if rsi else 'N/A'} "
+            f"[{trend_info}]"
+        )
+
+        # Reserve position slot and execute
+        state.has_position = True
+        state.current_order = {"direction": direction, "_reserved": True}
+        state.last_entry_time = datetime.now()
+        self._last_global_entry_time = datetime.now()
+
+        # Track entry for per-symbol limit
+        if symbol not in self._symbol_entry_times:
+            self._symbol_entry_times[symbol] = []
+        self._symbol_entry_times[symbol].append(datetime.now())
+
+        await self._execute_entry(symbol, fvg, current_price, 1.0)
 
     # ==================== Entry Logic ====================
 
@@ -1805,12 +2010,47 @@ class StrategyEngine:
             # Calculate TP/SL (with adaptive R:R based on HTF trend)
             candles = self.ws_handler.get_candle_buffer(symbol)
             htf_trend = self._htf_trend.get(symbol, HTF_RANGING)
-            tpsl = self.tpsl_calculator.calculate(
-                entry_price=entry_price,
-                fvg=fvg,
-                candles=candles,
-                htf_trend=htf_trend,
-            )
+
+            if fvg.signal_source == "ema":
+                # === EMA signal: pure ATR-based TP/SL ===
+                from .tpsl_calculator import TPSLLevels
+                atr = TPSLCalculator.calculate_atr(candles, period=self.config.tpsl.atr_period)
+                atr = max(atr, entry_price * self.config.tpsl.atr_floor_pct)
+                sl_distance = atr * 1.5  # 1.5 ATR stop
+                tp_distance = sl_distance * self.config.tpsl.force_close_at_r  # 3R target
+
+                if fvg.direction == TradeDirection.LONG:
+                    sl_price = entry_price - sl_distance
+                    tp_price = entry_price + tp_distance
+                else:
+                    sl_price = entry_price + sl_distance
+                    tp_price = entry_price - tp_distance
+
+                sl_price = max(sl_price, 0.0001)
+                tp_price = max(tp_price, 0.0001)
+
+                tpsl = TPSLLevels(
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    risk_amount=sl_distance,
+                    reward_amount=tp_distance,
+                    atr=atr,
+                    method="ema_atr",
+                )
+                logger.info(
+                    f"📊 EMA TP/SL [{symbol} {fvg.direction.value}]: "
+                    f"SL={fmt_price(sl_price)} ({sl_distance/entry_price*100:.3f}%, 1.5×ATR) "
+                    f"TP={fmt_price(tp_price)} ({tp_distance/entry_price*100:.3f}%, {self.config.tpsl.force_close_at_r}R) "
+                    f"ATR={fmt_price(atr)}"
+                )
+            else:
+                # === FVG signal: zone-based TP/SL (legacy) ===
+                tpsl = self.tpsl_calculator.calculate(
+                    entry_price=entry_price,
+                    fvg=fvg,
+                    candles=candles,
+                    htf_trend=htf_trend,
+                )
 
             # Guard: reject entry if SL distance is too wide (high ATR = too volatile)
             sl_distance_pct = abs(tpsl.sl_price - entry_price) / entry_price
@@ -1821,6 +2061,9 @@ class StrategyEngine:
                     f"SL too wide {sl_distance_pct*100:.2f}% > {max_sl_pct*100:.1f}% max "
                     f"(high ATR = volatile, entry would be noise-killed)"
                 )
+                if state:
+                    state.has_position = False
+                    state.current_order = None
                 return
 
             # Guard: reject entry if 1R < min_ticks — price granularity too coarse for meaningful R:R
@@ -1836,6 +2079,9 @@ class StrategyEngine:
                     f"1R={fmt_price(risk_abs)} = {risk_ticks:.1f} ticks "
                     f"(min {min_ticks} ticks, tick={tick_size}) — price too coarse"
                 )
+                if state:
+                    state.has_position = False
+                    state.current_order = None
                 return
 
             # Apply confluence multiplier to risk (soft BOS/HTF mode)
@@ -1917,13 +2163,41 @@ class StrategyEngine:
 
             # --- Step 3: Set TP/SL ---
             actual_notional = position_size.quantity * avg_open_price
-            tpsl = self.tpsl_calculator.calculate(
-                entry_price=avg_open_price,
-                fvg=fvg,
-                candles=candles,
-                htf_trend=htf_trend,
-                notional_usd=actual_notional,
-            )
+
+            if fvg.signal_source == "ema":
+                # === EMA signal: recalculate with actual fill price ===
+                from .tpsl_calculator import TPSLLevels
+                atr = TPSLCalculator.calculate_atr(candles, period=self.config.tpsl.atr_period)
+                atr = max(atr, avg_open_price * self.config.tpsl.atr_floor_pct)
+                sl_distance = atr * 1.5
+                tp_distance = sl_distance * self.config.tpsl.force_close_at_r
+
+                if fvg.direction == TradeDirection.LONG:
+                    sl_price = avg_open_price - sl_distance
+                    tp_price = avg_open_price + tp_distance
+                else:
+                    sl_price = avg_open_price + sl_distance
+                    tp_price = avg_open_price - tp_distance
+
+                sl_price = max(sl_price, 0.0001)
+                tp_price = max(tp_price, 0.0001)
+
+                tpsl = TPSLLevels(
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    risk_amount=sl_distance,
+                    reward_amount=tp_distance,
+                    atr=atr,
+                    method="ema_atr",
+                )
+            else:
+                tpsl = self.tpsl_calculator.calculate(
+                    entry_price=avg_open_price,
+                    fvg=fvg,
+                    candles=candles,
+                    htf_trend=htf_trend,
+                    notional_usd=actual_notional,
+                )
 
             for attempt in range(3):
                 try:

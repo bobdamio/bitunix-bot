@@ -90,6 +90,9 @@ class FVG:
     gap_percent: float = 0.0
     volume_ratio: float = 1.0
     
+    # Signal source: "fvg" (default) or "ema" (EMA crossover trend-following)
+    signal_source: str = "fvg"
+    
     @property
     def range(self) -> float:
         """Gap size in price units"""
