@@ -554,6 +554,51 @@ class StrategyEngine:
         return ema
 
     @staticmethod
+    def _calc_adx(candles, period: int = 14) -> float:
+        """Calculate ADX (Average Directional Index) — trend strength.
+        
+        ADX >= 20: market is trending (good for EMA crossover)
+        ADX < 20:  market is choppy/ranging (skip entry)
+        """
+        if len(candles) < period + 2:
+            return 0.0
+        pdm, mdm, trs = [], [], []
+        for i in range(1, len(candles)):
+            h = candles[i].high if hasattr(candles[i], 'high') else candles[i]['h']
+            l = candles[i].low if hasattr(candles[i], 'low') else candles[i]['l']
+            ph = candles[i-1].high if hasattr(candles[i-1], 'high') else candles[i-1]['h']
+            pl = candles[i-1].low if hasattr(candles[i-1], 'low') else candles[i-1]['l']
+            pc = candles[i-1].close if hasattr(candles[i-1], 'close') else candles[i-1]['c']
+            up, down = h - ph, pl - l
+            pdm.append(up if (up > down and up > 0) else 0)
+            mdm.append(down if (down > up and down > 0) else 0)
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        if len(trs) < period:
+            return 0.0
+        atr = sum(trs[:period]) / period
+        ps = sum(pdm[:period]) / period
+        ms = sum(mdm[:period]) / period
+        dxs = []
+        for i in range(period, len(trs)):
+            atr = (atr * (period - 1) + trs[i]) / period
+            ps = (ps * (period - 1) + pdm[i]) / period
+            ms = (ms * (period - 1) + mdm[i]) / period
+            if atr == 0:
+                continue
+            pdi = 100 * ps / atr
+            mdi = 100 * ms / atr
+            s = pdi + mdi
+            if s == 0:
+                continue
+            dxs.append(100 * abs(pdi - mdi) / s)
+        if not dxs:
+            return 0.0
+        adx = sum(dxs[:period]) / min(period, len(dxs))
+        for dx in dxs[period:]:
+            adx = (adx * (period - 1) + dx) / period
+        return adx
+
+    @staticmethod
     def _rsi(closes: list, period: int = 14) -> float:
         """Calculate RSI from a list of closing prices."""
         if len(closes) < period + 1:
@@ -995,6 +1040,15 @@ class StrategyEngine:
         dir_str = direction.value
         trend_info = self._get_trend_info(symbol)
 
+        # === ADX chop filter: skip entry in ranging/choppy market ===
+        adx = self._calc_adx(candles)
+        adx_min = 20  # ADX < 20 = choppy market, EMA crosses are noise
+        if adx < adx_min:
+            logger.info(
+                f"🚫 EMA cross {symbol} {dir_str} blocked — ADX={adx:.1f} < {adx_min} (choppy market)"
+            )
+            return
+
         # === RSI confirmation: skip overbought BUYs and oversold SELLs ===
         rsi = self._rsi_cache.get(symbol)
         rsi_ob = self.config.trend.rsi_overbought
@@ -1127,7 +1181,7 @@ class StrategyEngine:
             f"📊 EMA CROSS: {symbol} {dir_str} | "
             f"EMA9={ema9:.6f} EMA21={ema21:.6f} | "
             f"price={current_price:.6f} RSI={f'{rsi:.1f}' if rsi else 'N/A'} "
-            f"[{trend_info}]"
+            f"ADX={adx:.1f} [{trend_info}]"
         )
 
         # Reserve position slot and execute
