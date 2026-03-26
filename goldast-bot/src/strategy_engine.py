@@ -1126,7 +1126,7 @@ class StrategyEngine:
         logger.info(
             f"📊 EMA CROSS: {symbol} {dir_str} | "
             f"EMA9={ema9:.6f} EMA21={ema21:.6f} | "
-            f"price={current_price:.6f} RSI={rsi:.1f if rsi else 'N/A'} "
+            f"price={current_price:.6f} RSI={f'{rsi:.1f}' if rsi else 'N/A'} "
             f"[{trend_info}]"
         )
 
