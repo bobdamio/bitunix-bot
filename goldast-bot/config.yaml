@@ -1,0 +1,463 @@
+# GoldasT Bot v2.1 Configuration
+# Optimized: 5x leverage, no partial TP, R:R 3:1, strict filters
+# Balance: ~$130, Margin per trade: 5%, Leverage: 5x → ~$130 notional/trade
+
+# API Credentials
+api:
+  key: "${BITUNIX_API_KEY}"
+  secret: "${BITUNIX_SECRET}"
+  base_url: "https://fapi.bitunix.com"
+  timeout: 30                    # HTTP request timeout (seconds)
+
+# Core Symbols — selected by EMA(9/21)+EMA(50)+ADX+HTF scanner on 200×15m candles (Mar 27)
+# Criteria: positive EV with 4R TP, WR>=25%, EMA stack alignment
+core_symbols:
+  - OPENUSDT
+  - MORPHOUSDT
+  - COLLECTUSDT
+  - VVVUSDT
+  - THEUSDT
+  - XPTUSDT
+  - BLESSUSDT
+  - ONDOUSDT
+  - BLUAIUSDT
+  - GUNUSDT
+  - BOMEUSDT
+  - HBARUSDT
+  - MERLUSDT
+  - RESOLVUSDT
+  - YFIUSDT
+  - CHZUSDT
+  - GIGGLEUSDT
+  - HUMAUSDT
+  - PEOPLEUSDT
+  - NOMUSDT
+  - ONTUSDT
+  - KAVAUSDT
+  - BRUSDT
+
+# Blacklist — permanently banned, never added by rotation
+blacklist:
+  - INJUSDT            # -$30, 0/13 WR=0%
+  - AXSUSDT            # [20012] not tradeable
+  - POWERUSDT          # [20012] not tradeable
+  - ENAUSDT            # -$7, 0/5 WR=0%
+  - ETCUSDT            # -$8, WR=25%
+  - SUIUSDT            # -$9, WR=20%
+  - DOGEUSDT           # -$11, WR=28%
+  - LINKUSDT           # -$10, WR=25%
+  - ADAUSDT            # -$7, WR=18%
+  # BTCUSDT — unbanned, moved to core
+  - SOLUSDT            # -$16, WR=33%
+  - XRPUSDT            # -$16, WR=38%
+  - DOTUSDT            # -$14, WR=45% but high fees
+  - BNBUSDT            # -$13, WR=27%
+  - AAVEUSDT           # -$13, WR=35%
+  # XAGUSDT — unbanned, moved to core
+  - ICPUSDT            # -$9, WR=38%
+  - PAXGUSDT           # -$4, WR=17%
+  - PIPPINUSDT         # -$4, WR=0%
+  - 1000PEPEUSDT       # -$6, WR=30%
+  - HYPEUSDT           # -$5, WR=33%
+  - AVAXUSDT           # -$4, WR=35%
+  - KITEUSDT            # -$5, 0W/4L WR=0% — instant SL
+  - AKEUSDT             # -$2, 0W/1L — fast SL
+  - FHEUSDT             # -$2, 0W/1L — fast SL
+  - ESPUSDT             # -$2, 0W/2L WR=0%
+  - BEATUSDT            # -$2.24, 0W/1L WR=0%
+  - RIVERUSDT           # -$1.91, 0W/1L WR=0%
+  - TAOUSDT             # -$0.68, 0W/2L WR=0%
+  - OPNUSDT             # -$1.75, 1W/1L WR=50% — neg PnL asymmetry
+  - JUPUSDT             # -$0.10, 0W/2L WR=0%
+  - WIFUSDT             # -$0.93, 0W/1L WR=0%
+  - SKRUSDT             # -$2.23, 0W/1L — wide SL due to cheap price
+  - MANTRAUSDT          # [20012] not tradeable — repeated rejections
+  # XAUUSDT — removed (not available on Lead Account)
+  # Mar 8 batch — trial symbols with 0% WR and fast SL hits
+  - PIUSDT              # -$3.29, 0W/2L, both <5 min SL
+  - GRASSUSDT           # -$2.20, 0W/3L, consistent loser
+  - SAHARAUSDT          # -$4.81, 3W/4L but net -$4.81 — terrible R:R
+  - LAUSDT              # -$1.15, 0W/2L, quick SL hits
+  # NAORISUSDT — unblocked for EMA crossover strategy
+  - SENTUSDT            # -$1.34, 0W/1L
+  # RESOLVUSDT — unblocked for EMA crossover strategy
+  - TRIAUSDT            # -$0.90, 0W/1L
+  - FILUSDT             # -$0.56, 0W/1L, 0 min trade
+  - ATHUSDT             # [20012] not tradeable on Bitunix
+  - BANANAS31USDT       # [20012] not tradeable on Bitunix
+  - DENTUSDT            # [20012] not tradeable on Bitunix
+  - GMXUSDT             # [20012] not tradeable on Bitunix
+  - FLOWUSDT            # [20012] not tradeable on Bitunix
+  - UAIUSDT             # [20012] not tradeable on Bitunix
+  - COSUSDT             # [20012] not tradeable on Bitunix
+  # Recent losers (Mar 2026) — add to blacklist
+  - ANIMEUSDT           # -$1.59, 0W/1L — quick SL
+  - LABUSDT             # -$0.89, 0W/1L — fast loss
+  - TRADOORUSDT         # -$1.57, 0W/1L — instant SL
+  - BANUSDT             # -$0.62, 0W/1L — reversal against
+  - EIGENUSDT           # -$0.52, 0W/1L — SL hit
+  # PTBUSDT — unblocked for EMA crossover strategy
+
+# Trading Symbols — selected by EMA(9/21)+EMA(50) scanner with ADX+HTF filters, 4R TP
+# Scanned 204 pairs, 23 passed with positive EV (Mar 27 rescan)
+symbols:
+  - OPENUSDT           # ADX=45 WR=67% EV=+233% stack=BULL vol=$0.5M
+  - MORPHOUSDT         # ADX=18 WR=67% EV=+233% stack=BULL vol=$0.4M
+  - COLLECTUSDT        # ADX=39 WR=50% EV=+150% stack=BULL vol=$0.4M
+  - VVVUSDT            # ADX=30 WR=50% EV=+150% stack=BEAR vol=$1.0M
+  - THEUSDT            # ADX=20 WR=50% EV=+150% stack=BULL vol=$0.2M
+  - XPTUSDT            # ADX=15 WR=50% EV=+150% stack=BULL vol=$1.1M
+  - BLESSUSDT          # ADX=12 WR=50% EV=+150% stack=BEAR vol=$0.8M
+  - ONDOUSDT           # ADX=10 WR=50% EV=+150% stack=BEAR vol=$7.9M
+  - BLUAIUSDT          # ADX=23 WR=50% EV=+150% stack=MIX  vol=$10.6M
+  - GUNUSDT            # ADX=21 WR=50% EV=+150% stack=MIX  vol=$0.5M
+  - BOMEUSDT           # ADX=15 WR=50% EV=+150% stack=MIX  vol=$0.2M
+  - HBARUSDT           # ADX=12 WR=50% EV=+150% stack=MIX  vol=$3.5M
+  - MERLUSDT           # ADX=18 WR=33% EV=+67%  stack=BEAR vol=$0.3M
+  - RESOLVUSDT         # ADX=14 WR=33% EV=+67%  stack=BULL vol=$0.7M
+  - YFIUSDT            # ADX=12 WR=33% EV=+67%  stack=BEAR vol=$0.6M
+  - CHZUSDT            # ADX=11 WR=33% EV=+67%  stack=BULL vol=$0.6M
+  - GIGGLEUSDT         # ADX=18 WR=33% EV=+67%  stack=MIX  vol=$0.3M
+  - HUMAUSDT           # ADX=16 WR=33% EV=+67%  stack=MIX  vol=$1.2M
+  - PEOPLEUSDT         # ADX=14 WR=33% EV=+67%  stack=MIX  vol=$0.3M
+  - NOMUSDT            # ADX=10 WR=33% EV=+67%  stack=MIX  vol=$0.3M
+  - ONTUSDT            # ADX=22 WR=25% EV=+25%  stack=BULL vol=$6.4M
+  - KAVAUSDT           # ADX=16 WR=25% EV=+25%  stack=BULL vol=$0.3M
+  - BRUSDT             # ADX=14 WR=25% EV=+25%  stack=BEAR vol=$6.5M
+
+# FVG Entry Settings — STRICT: fewer but higher-quality trades
+fvg:
+  timeframe: "15m"             # 15m — wider FVGs, less noise, better R:R
+  entry_zone_min: 0.40          # 40% fill — deeper zone entry required (was 0.35 → too shallow, 26%WR)
+  min_strength: 0.75           # 0.75 — higher quality FVGs only (was 0.60 → too weak)
+  entry_zone_max: 0.85         # Narrowed 90%→85% — deep fills = worse R:R
+  min_gap_percent: 0.003       # 0.3% min gap — fallback floor when ATR not available
+  min_gap_atr_mult: 0.3        # ATR-dynamic min gap: gap must be ≥ 0.3×ATR (overrides % when stricter)
+  max_active_fvgs: 2           # 2 FVGs per symbol — quality over quantity (was 3)
+  lookback_candles: 40         # 15m×40 = 10h — wider lookback for valid zones (was 30=7.5h)
+  min_volume_ratio: 0.7        # Lowered 1.0→0.7 — unlock ETH/XAUT/POL (789 volume blocks)
+  edge_entry_tolerance: 0.0000  # DISABLED — anticipatory entries caused 9/9 quick SL hits last week (was 0.10%)
+  min_candle_age: 1            # Wait 1 closed candle — confirmation
+  allowed_direction: "BOTH"    # Both directions — symmetric trend score filter
+  max_zone_distance: 0.050     # 5.0% — wider scanner proximity window (was 2.5% — too tight, zeroed out scores)
+  max_entry_distance: 0.020    # 2.0% — wider proximity window (was 1.5%)
+  ifvg_threshold_pct: 0.5      # IFVG violation threshold %
+  impulse_body_ratio: 0.5      # Impulse candle filter: gap candle body must be ≥ 50% of its range for full strength score
+
+# Trend Filter (strict — only trade with clear trend confirmation)
+# Score = weighted blend of EMA alignment + price momentum + EMA slope
+# Stricter thresholds = fewer but higher-quality entries
+trend:
+  entry_threshold: 0.35        # SHORT threshold — raised 0.25→0.35 (was too lenient, 47% WR)
+  long_entry_threshold: 0.40   # LONG threshold — raised 0.30→0.40 (stricter for better quality)
+  ema_fast: 8                  # Fast EMA period
+  ema_slow: 21                 # Slow EMA period
+  weight_15m: 0.20             # 20% — less weight on noisy 15m (was 30%)
+  weight_1h: 0.80              # 80% — primary direction (was 70%)
+  # BTC Market Leader Filter — dynamic market regime detector
+  # Bull market: LONGs get boost (easier entry), SHORTs get nerfed (harder entry)
+  # Bear market: SHORTs get boost, LONGs get nerfed
+  btc_leader_enabled: true     # Use BTC 1h trend as market regime indicator
+  btc_leader_nerf_multiplier: 3.0  # ×3 threshold for counter-regime direction (was ×2 — too weak)
+  btc_leader_boost_divisor: 1.5    # ÷1.5 threshold for with-regime direction (NEW — easier entry with trend)
+  # Trend Direction Flip — flip FVG direction to match strong 1h trend instead of blocking
+  trend_flip_enabled: false     # DISABLED — flipping FVG direction destroys structural entry meaning
+  trend_flip_threshold: 0.35   # (inactive)
+  # RSI extremes filter
+  rsi_overbought: 75.0         # Block LONG above this RSI (overbought)
+  rsi_oversold: 25.0           # Block SHORT below this RSI (oversold)
+  # Candle body filter
+  min_candle_body_atr_ratio: 0.15  # Last candle body > this × ATR
+  # ATR period
+  atr_period: 14               # ATR calculation period used across strategy
+  # Trend score component weights (must sum to 1.0)
+  score_weight_alignment: 0.50 # EMA alignment weight
+  score_weight_momentum: 0.30  # Price momentum weight
+  score_weight_slope: 0.20     # EMA slope weight
+  strong_trend_multiplier: 2.0 # Threshold × this = "STRONG" label
+  trend_rescan_distance: 0.005 # Mid-tick FVG rescan distance (0.5%)
+  # === BOS (Break of Structure) Filter ===
+  # Require structural confirmation: LONG needs bullish BOS, SHORT needs bearish BOS
+  # BOS = price broke above swing high (bullish) or below swing low (bearish)
+  bos_enabled: true              # ENABLED — BOS determines trade direction
+  bos_soft_mode: true            # SOFT MODE: no BOS → half-size entry (hard blocked 279+214=493 entries — too many)
+  bos_direction_override: false  # FVG determines direction (has built-in structural direction). BOS = confirmation only
+  bos_max_age_candles: 15          # BOS must be within last 15 × 15m candles (3.75h) — was 8 (too strict, blocked 80% entries)
+  bos_min_hold_candles: 3          # BOS must hold direction for 3 candles (45 min) before trusting — prevents flip-flop entries
+  # === HTF (1h) FVG Zone Confluence ===
+  # 15m FVG must overlap with a 1h FVG zone — ensures structural significance
+  htf_fvg_enabled: true                  # ENABLED — require 1h zone backing
+  htf_soft_mode: true                    # SOFT MODE: no HTF → ×0.5 size (hard blocked 217 entries in 18h — too aggressive)
+  htf_fvg_min_gap_percent: 0.001         # 0.1% min gap for 1h FVG detection
+  htf_fvg_max_zones: 10                  # Track up to 10 zones per symbol
+  htf_fvg_strength_bonus: 0.15           # +15% strength bonus for confluent entries
+  soft_mode_size_mult: 0.5               # Position size multiplier when BOS/HTF missing (50%)
+  confluence_bonus_mult: 1.25            # Bonus when BOTH BOS+HTF confirm (125% size)
+  # === Exhaustion Reversal Detection ===
+  # 3+ consecutive strong candles = momentum exhaustion → expect reversal
+  # Reversal entry (opposite dir) gets boost, chasing (same dir) gets blocked
+  exhaustion_enabled: true               # Enable exhaustion reversal detection
+  exhaustion_min_candles: 3              # Min consecutive strong candles to trigger (3-4)
+  exhaustion_body_atr_ratio: 0.5         # Each candle body must be > 0.5× ATR to count
+  exhaustion_boost_mult: 1.5             # Position size boost for reversal entries (×1.5)
+  # === Liquidity Sweep Filter ===
+  # Before entering, check if price recently swept a swing point (grabbed liquidity)
+  # LONG: price swept below swing low → sell-side liquidity taken → reversal expected
+  # SHORT: price swept above swing high → buy-side liquidity taken → reversal expected
+  sweep_enabled: true                    # ENABLED — check for liquidity sweeps
+  sweep_soft_mode: true                  # SOFT MODE: no sweep → reduced size (not blocked)
+  sweep_max_age_candles: 10              # Sweep must be within last 10 × 15m candles (2.5h)
+  sweep_size_mult: 0.5                   # Position size when no sweep detected (50%)
+  sweep_bonus_mult: 1.25                 # Position size bonus when sweep confirmed (×1.25)
+
+# TP/SL Settings — FIXED 3R TP + BE protection
+# Exchange closes position at 3R profit. Trailing only moves SL to BE at 1.5R.
+# Simulation: Fixed 3R TP = +$129 (+$6.13/day) vs trailing = -$77 (-$3.67/day)
+tpsl:
+  sl_buffer_atr_mult: 0.15     # Tighter buffer — less slippage room
+  sl_min_atr_mult: 0.6         # Min SL = 0.6x ATR
+  sl_max_atr_mult: 2.0         # Max SL = 2.0x ATR — wider SL reduces quick stops (40 trades <30min=WR15% all noise-killed)
+  min_rr: 2.0                  # 2.0:1 R:R — raised 1.8→2.0, more room for price movement before TP
+  tp_min_atr_mult: 1.2         # TP floor = 1.2x ATR (ensures meaningful distance)
+  max_tp_distance_pct: 100.00  # Safety net only — trailing controls actual exits (was 10%, now uncapped)
+  min_tp_usd: 0.80             # Min TP profit $0.80 — must clear round-trip fees $0.20 + meaningful profit (was $0.50)
+  min_tp_distance_pct: 0.50    # Min TP distance 0.50% — wider TP floor (was 0.35%, left too little after fees)
+  # Trailing SL — 3-phase system
+  # CRITICAL FIX: runner_at MUST be > be_at, otherwise runner activates with SL BELOW entry!
+  # Old: be=2.0 runner=1.5 → at 1.5R, SL=price-2R=entry-0.5R → ZERO profit protection
+  trailing_enabled: true
+  # FIXED 3R TP strategy: TP set on exchange at 3R, trailing only does BE protection
+  # Simulation: 500 trades × Fixed 3R TP = +$129 (+$6.13/day) vs current trailing = -$77
+  trailing_breakeven_at_r: 1.5  # BE at 1.5R — move SL to entry, protect capital
+  trailing_be_lock_r: 0.05      # BE SL = entry + 0.05R — almost exact breakeven (just cover spread)
+  trailing_runner_at_r: 99.0    # DISABLED — runner never activates, TP at 3R handles exit
+  trailing_be_trail_offset_r: 99.0     # DISABLED — no progressive sliding, fixed BE only
+  trailing_runner_sl_distance_r: 2.0   # (inactive — runner disabled)
+  trailing_runner_tp_distance_r: 1.5   # (inactive — runner disabled)
+  trailing_step_r: 0.20         # Min SL move to trigger API call
+  # FIXED TP at 3R — the exchange closes position at 3R profit
+  # This is the KEY CHANGE: no more trailing converting 3R winners into $0.14 BE exits
+  force_close_at_r: 4.0         # TP at 4R — with EMA crossover, 4R gives BE=22% WR (was 3R=27%)
+  # Trailing tightening — DISABLED (runner never activates)
+  trailing_tighten_at_r: 99.0   # (inactive)
+  trailing_tighten_min_distance_r: 1.0  # (inactive)
+  trailing_tighten_final_distance_r: 0.5  # (inactive)
+  atr_period: 14                # ATR calculation period for TP/SL
+  # ATR fallbacks (when candle data is unavailable)
+  atr_fallback_pct: 0.0015     # Fallback ATR estimate as % of price (0.15%)
+  atr_floor_pct: 0.0001        # ATR safety floor as % of price (0.01%)
+  fallback_notional_usd: 120.0 # Fallback notional for min TP USD calculation
+  # SL validation correction
+  sl_correction_pct: 0.003     # SL adjustment when on wrong side of price (0.3%)
+  # Breakeven classification
+  breakeven_pnl_threshold: 0.50 # USD threshold to classify close as BE ($0.50)
+  # Partial TP — close 50% at 1R, let rest trail
+  partial_tp_enabled: false     # DISABLED — was killing R:R (avg win $0.69 instead of $1.40)
+  partial_tp_percent: 0.5       # (inactive)
+  partial_tp_at_r: 1.0          # (inactive)
+  # Adaptive R:R — DISABLED
+  adaptive_rr_enabled: false
+  trending_rr: 1.5
+  ranging_rr: 1.5
+  # Legacy
+  sl_multiplier: 0.618
+  tp_multiplier: 1.618
+
+# Leverage — 5x everywhere (46% WR vs 34% on 10x)
+leverage:
+  low: 5                         # 5x — wider SL, less noise wicks, WR+12%
+  high: 5                        # 5x always (consistent sizing)
+  confidence_threshold: 0.6
+
+# Position Sizing — conservative: smaller positions, tighter caps
+position:
+  risk_percent: 0.02           # 2% risk — smaller losses per trade (was 3%, avg loss=$1.10)
+  min_position_usd: 5
+  max_position_usd: 5000       # Uncapped for compound growth — balance × leverage × margin_safety handles the real limit
+  max_balance_percent: 80.0    # 80% — aggressive compound growth, unlocks full position sizing
+  risk_min_multiplier: 0.5     # Dynamic risk floor: risk_percent × this
+  risk_max_multiplier: 2.0     # Dynamic risk cap: risk_percent × this
+  risk_adjustment_rate: 0.20   # ±20% per trade result (dynamic risk sizing)
+  # Position sizing guards
+  min_sl_guard_pct: 0.0005     # Min SL distance guard (0.05%) — prevents absurd sizes
+  margin_safety_factor: 0.95   # Fee/margin safety factor (95% of max capacity)
+  default_min_qty: 0.001       # Default min quantity when symbol not in min_quantities
+  default_step_size: 0.0001    # Default quantity step size for rounding
+  min_quantities:
+    XAUTUSDT: 0.01
+    XAGUSDT: 0.1
+    ETHUSDT: 0.003
+    UNIUSDT: 2
+    BTCUSDT: 0.0001
+    XRPUSDT: 2
+    AVAXUSDT: 1
+    LINKUSDT: 0.1
+    ICPUSDT: 1
+    SUIUSDT: 10
+    # Legacy (for closing old positions)
+    SOLUSDT: 0.1
+    HYPEUSDT: 0.1
+    PUMPFUNUSDT: 263
+    TAOUSDT: 0.002
+    KASUSDT: 17
+    # New symbols (Feb 23)
+    TRXUSDT: 10
+    DOTUSDT: 5
+    AXSUSDT: 5
+    LTCUSDT: 0.1
+    WLDUSDT: 15
+    WIFUSDT: 25
+
+# Multi-Symbol — fewer positions, better focus
+multi_symbol:
+  max_concurrent_positions: 6   # Max 6 positions, max 3 per direction
+  position_per_symbol: 1
+  max_same_direction: 3         # Max 3 same direction
+  correlation_guard_enabled: true  # Block correlated symbols in same direction (e.g. 2 gold LONGs)
+  max_correlated_same_dir: 1       # Max 1 position per correlation group per direction
+
+# Session Filter — 24/7 trading
+# With Fixed 3R TP + symbol whitelist, hour filter is unnecessary:
+# L1 (good syms, all hours) = $6.11/day vs L4 (good syms + hour filter) = $2.66/day
+session:
+  enabled: true
+  weekdays_only: false
+  killzones:
+    - name: Full_Day
+      start_hour: 0
+      end_hour: 24           # Trade 24/7 — edge comes from Fixed 3R TP + symbol whitelist, not hours
+
+# Cooldowns — STRICT: dramatically reduce trade frequency
+# 346 trades × $0.19 fee = $65 fees (48% of all losses)
+cooldowns:
+  entry_cooldown_seconds: 300    # 5 min between entries per symbol — reduce overtrading (was 3 min, 16 trades/day too many)
+  win_cooldown_seconds: 60       # 1 min after TP hit — fast re-entry on momentum
+  loss_cooldown_seconds: 900     # 15 min after SL hit — longer pause (was 10 min, still revenge-traded)
+  signal_cooldown_seconds: 45
+  klines_ready_threshold: 10     # Start trading after 10 candles (15m = 2.5h warmup)
+  tpsl_placement_delay: 2
+  # Global burst limiter — prevents N entries firing simultaneously
+  global_entry_cooldown_seconds: 300  # 5 min — reduce total trade count to ~8-10/day (was 3 min → 16/day, fees=$11/week)
+  # Zone cooldown — don't re-enter a zone that just hit SL/BE
+  zone_cooldown_seconds: 300     # 5 min — zone can retest sooner (was 15 min)
+  zone_overlap_threshold: 0.50   # 50% overlap with spent zone = blocked
+  # Per-symbol entry limit (prevent repeat entries into losing symbol)
+  max_entries_per_symbol: 2      # Max 2 entries per symbol per window
+  max_entries_window_hours: 2    # Window size: 2 hours
+
+# Circuit Breaker
+circuit_breaker:
+  failure_threshold: 5
+  recovery_timeout: 60
+
+# Retry
+retry:
+  max_attempts: 3
+  initial_delay: 1.0
+  max_delay: 60.0
+  backoff_factor: 2.0
+
+# Anti-Detection
+randomization:
+  enabled: true
+  size_jitter_percent: 0.03
+  timing_jitter_ms: 300
+
+# WebSocket
+websocket:
+  public_url: "wss://fapi.bitunix.com/public/"
+  private_url: "wss://fapi.bitunix.com/private/"
+  ping_interval: 20
+  reconnect_attempts: 5
+  reconnect_interval: 5
+
+# Database
+database:
+  path: "goldast_bot.db"
+
+# Telegram Bot Configuration
+telegram:
+  enabled: true                           # Enable/disable Telegram bot
+  bot_token: "${TELEGRAM_BOT_TOKEN}"      # Bot token from @BotFather
+  allowed_users: [6085235890]             # List of allowed user IDs
+  notifications_enabled: true             # Send trade notifications
+  hourly_stats: false                     # Send hourly statistics
+  daily_summary: false                    # Send daily summary at 00:00 UTC
+  quiet_hours: false                      # Disable notifications during quiet hours
+  quiet_start: 22                         # Quiet hours start (24h format)
+  quiet_end: 7                            # Quiet hours end (24h format)
+
+# Logging
+logging:
+  level: "INFO"
+  file: "logs/goldast_bot.log"
+  max_size_mb: 10
+  backup_count: 5
+
+# Risk Management — tighter daily limit
+risk:
+  max_daily_loss_percent: 2.0    # Stop at -2% daily loss — tighter (was 3%)
+  max_drawdown_percent: 10.0     # Emergency stop at -10% (was 15%)
+  margin_warning_percent: 70.0   # Warning earlier (was 80%)
+  # Per-symbol consecutive loss ban
+  symbol_max_consecutive_losses: 1   # Ban symbol after 1 loss — be strict (was 2)
+  symbol_loss_ban_seconds: 43200     # Ban duration: 12 hours (rotation symbols)
+  core_symbol_loss_ban_seconds: 3600 # Ban duration: 1 hour (core symbols — lighter penalty)
+  # Global consecutive loss limiter — pause ALL trading after streak
+  global_max_consecutive_losses: 4   # After 4 losses in a row (ANY symbols) → pause
+  global_loss_pause_seconds: 1800    # Pause all trading for 30 min (was: no limit → 9 losses in a row)
+  # Direction timeout (block direction after net losses exceed threshold)
+  direction_nerf_window: 5               # Look at last N trades per direction
+  direction_nerf_net_pnl_threshold: -999.0 # DISABLED — was blocking entire direction after 2 losses, missing runners
+  direction_nerf_duration_seconds: 3600  # Block timeout: 1 hour
+  direction_nerf_multiplier: 3.0         # (legacy) threshold multiplier if not fully blocked
+
+# Symbol Rotation — Accumulative growth system
+# 3 tiers: Core (7 pinned) → Proven (profitable, kept) → Trial (new/cycle)
+# List starts at 15, grows to max 25 as rotation adds profitable symbols
+rotation:
+  enabled: false                 # DISABLED — only trade whitelisted 21 symbols with proven WR>=50%
+  interval_hours: 0.5            # Rotate every 30min — faster response to market changes (was 1h)
+  max_symbols: 15                # More active symbols = more opportunities (soft BOS/HTF now handle quality via position sizing)
+  rotation_pool_size: 8          # Add up to 8 trial candidates to fill 15 slots (was 5 — not enough for 15 symbols)
+  min_score: 55.0                # Lowered 65→55 — htfZ=0 for 90% of symbols costs ~5pts, soft mode handles risk via sizing
+  scan_top_n: 500                # Scan top 500 pairs — wider search to find zone-reachable coins (was 200)
+  scan_candles: 100              # 15m candles per symbol (100x15m = 25h) — matches live bot buffer, prevents signal_rate inflation
+  min_24h_volume: 500000         # $500K min vol — catch more micro-cap gems (was $500K)
+  pnl_lookback_hours: 24         # PnL window: 24h — drop losers faster (was 72h)
+  protect_profitable: true       # Keep symbols with positive PnL, only replace losers
+  max_losing_trades: 3           # Remove symbol after 3 consecutive losses
+  pnl_ban_enabled: true          # Enable PnL-based ban for rotation symbols
+  pnl_ban_hours: 24              # Ban losing rotation symbols for 24h
+  pnl_ban_threshold: -1.0        # Ban any rotation symbol with PnL below -$1 (was -$2 = too lenient)
+  removed_cooldown_hours: 3.0    # Removed symbols can't come back for 3h
+  pnl_penalty_per_dollar: 5.0    # Score penalty: 5 pts per $1 of negative PnL
+  pnl_bonus_per_dollar: 3.0      # Score bonus: 3 pts per $1 of positive PnL
+  pnl_bonus_cap: 15.0            # Max bonus points (cap prevents score inflation)
+  # Proven promotion thresholds
+  proven_min_pnl: 0.50           # Min net PnL ($) to promote to "proven" tier
+  proven_min_trades: 2           # Min trades to qualify as proven
+  proven_min_wr: 40.0            # Min WR% to promote to proven tier
+  # Trial symbol restrictions — stricter rules for unproven symbols
+  trial_min_fill: 0.25           # Trial symbols need 25% zone fill (matches entry_zone_min) — proven symbols exempt
+  trial_require_confluence: false # DISABLED — BOS/HTF soft mode already reduces size ×0.5, extra ×0.30 = ×0.15 = useless trades
+  trial_max_losing_trades: 2     # Remove trial after 2 losses — give trials a fair chance (1 loss = noise)
+  trial_size_multiplier: 0.5     # Trial symbols trade at 50% size — unproven = less risk
+  # Pipeline signal ban (fast 2h check between full rotations)
+  signal_ban_min_active_hours: 3.0    # Must be active this long before ban eligible (was 8h)
+  signal_ban_no_hit_hours: 2.0        # Remove if no zone hit for 2h — balanced: not too aggressive (was 1.5h = kicked good symbols)
+  # Cheap coin bonus — data shows coins <$0.05 have 62% WR vs 30% on expensive coins
+  cheap_coin_threshold: 0.10          # Price threshold for bonus ($0.10)
+  cheap_coin_bonus: 3.0               # +3 score points for cheap coins
+  # Opportunity scanner — fast market-wide proximity check every 15 min
+  # Scans 50+ symbols, finds ones with price RIGHT AT an FVG zone
+  # Hot-swaps cold trial symbols for high-proximity opportunities
+  opportunity_scan_enabled: true       # Enable frequent opportunity scanning
+  opportunity_scan_top_n: 100           # Scan top 100 symbols by volume (was 50 — too narrow, missed cheap gems)
+  opportunity_scan_candles: 100        # Fewer candles for speed (100×15m = 25h)
+  opportunity_min_proximity: 60.0      # Min actionable proximity to trigger swap (70→60 — more candidates pass)
+  opportunity_max_swaps: 3             # Max swaps per scan cycle (2→3 — faster refresh of cold symbols)
+  opportunity_min_score_advantage: 5.0   # Opportunity must beat trial by 5+ pts (10→5 — easier to replace cold symbols)
+
+# Dry Run
+dry_run: false

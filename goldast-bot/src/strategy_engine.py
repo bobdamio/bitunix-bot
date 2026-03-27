@@ -1015,6 +1015,7 @@ class StrategyEngine:
         # Compute current EMAs
         ema9 = self._ema(closes, 9)
         ema21 = self._ema(closes, 21)
+        ema50 = self._ema(closes, 50) if len(closes) >= 50 else None
 
         # Get previous EMAs
         prev_ema9 = self._prev_ema9.get(symbol)
@@ -1040,6 +1041,23 @@ class StrategyEngine:
         dir_str = direction.value
         trend_info = self._get_trend_info(symbol)
 
+        # === EMA(50) trend confluence filter ===
+        # LONG: both EMA9 and EMA21 must be above EMA50 (bullish stack)
+        # SHORT: both EMA9 and EMA21 must be below EMA50 (bearish stack)
+        if ema50 is not None:
+            if direction == TradeDirection.LONG and (ema9 < ema50 or ema21 < ema50):
+                logger.info(
+                    f"🚫 EMA cross {symbol} LONG blocked — EMA stack not bullish "
+                    f"(EMA9={ema9:.6f} EMA21={ema21:.6f} < EMA50={ema50:.6f})"
+                )
+                return
+            if direction == TradeDirection.SHORT and (ema9 > ema50 or ema21 > ema50):
+                logger.info(
+                    f"🚫 EMA cross {symbol} SHORT blocked — EMA stack not bearish "
+                    f"(EMA9={ema9:.6f} EMA21={ema21:.6f} > EMA50={ema50:.6f})"
+                )
+                return
+
         # === ADX chop filter: skip entry in ranging/choppy market ===
         adx = self._calc_adx(candles)
         adx_min = 20  # ADX < 20 = choppy market, EMA crosses are noise
@@ -1050,17 +1068,17 @@ class StrategyEngine:
             return
 
         # === HTF trend alignment: block counter-trend entries ===
-        # 1h score determines the dominant trend; 15m EMA crosses against it are noise.
-        # LONG only when 1h >= 0 (not bearish), SHORT only when 1h <= 0 (not bullish).
+        # Simple 1h direction check: 1h close > prev 1h close = bullish.
+        # This replaces complex score_1h thresholds — simpler, allows more trades.
         score_1h = self._score_1h.get(symbol, 0.0)
-        if direction == TradeDirection.LONG and score_1h < -0.2:
+        if direction == TradeDirection.LONG and score_1h < -0.1:
             logger.info(
-                f"🚫 EMA cross {symbol} LONG blocked — 1h trend={score_1h:+.2f} (bearish, counter-trend)"
+                f"🚫 EMA cross {symbol} LONG blocked — 1h trend={score_1h:+.2f} (bearish)"
             )
             return
-        if direction == TradeDirection.SHORT and score_1h > 0.2:
+        if direction == TradeDirection.SHORT and score_1h > 0.1:
             logger.info(
-                f"🚫 EMA cross {symbol} SHORT blocked — 1h trend={score_1h:+.2f} (bullish, counter-trend)"
+                f"🚫 EMA cross {symbol} SHORT blocked — 1h trend={score_1h:+.2f} (bullish)"
             )
             return
 
@@ -1194,7 +1212,7 @@ class StrategyEngine:
 
         logger.info(
             f"📊 EMA CROSS: {symbol} {dir_str} | "
-            f"EMA9={ema9:.6f} EMA21={ema21:.6f} | "
+            f"EMA9={ema9:.6f} EMA21={ema21:.6f} EMA50={f'{ema50:.6f}' if ema50 else 'N/A'} | "
             f"price={current_price:.6f} RSI={f'{rsi:.1f}' if rsi else 'N/A'} "
             f"ADX={adx:.1f} [{trend_info}]"
         )
