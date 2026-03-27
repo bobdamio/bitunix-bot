@@ -1,0 +1,45 @@
+# Exness Bot - Docker Compose
+# Usage:
+#   cp .env.example .env        # Fill in your credentials
+#   docker compose up -d        # Start bot
+#   docker compose logs -f      # Watch logs
+#   docker compose down         # Stop bot
+
+services:
+  exness-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: exness-bot
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    volumes:
+      # Persist logs and data
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Config (edit on host)
+      - ./config.yaml:/app/config.yaml:ro
+
+    environment:
+      - TZ=UTC
+      - MT5_SERVER=${MT5_SERVER}
+      - MT5_LOGIN=${MT5_LOGIN}
+      - MT5_PASSWORD=${MT5_PASSWORD}
+
+    # Memory limit to prevent OOM on VPS
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
