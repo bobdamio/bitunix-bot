@@ -91,6 +91,8 @@ class StrategyEngine:
 
         # 15m RSI cache: {symbol: rsi_value}
         self._rsi_cache: Dict[str, float] = {}
+        # 15m MFI cache: {symbol: mfi_value}
+        self._mfi_cache: Dict[str, float] = {}
 
         # Per-symbol last loss timestamp for post-loss cooldown
         self._last_loss_time: Dict[str, datetime] = {}
@@ -618,6 +620,35 @@ class StrategyEngine:
         return 100 - (100 / (1 + rs))
 
     @staticmethod
+    def _calc_mfi(candles, period: int = 14) -> float:
+        """Calculate MFI (Money Flow Index) — volume-weighted RSI.
+        
+        MFI > 50: money flowing IN (bullish confirmation)
+        MFI < 50: money flowing OUT (bearish confirmation)
+        """
+        if len(candles) < period + 1:
+            return 50.0  # neutral default
+        
+        typical_prices = [(c.high + c.low + c.close) / 3 for c in candles]
+        raw_money_flows = [tp * c.volume for tp, c in zip(typical_prices, candles)]
+        
+        pos_mf = 0.0
+        neg_mf = 0.0
+        start = len(candles) - period
+        for i in range(start, len(candles)):
+            if typical_prices[i] > typical_prices[i - 1]:
+                pos_mf += raw_money_flows[i]
+            elif typical_prices[i] < typical_prices[i - 1]:
+                neg_mf += raw_money_flows[i]
+        
+        if neg_mf == 0:
+            return 100.0
+        if pos_mf == 0:
+            return 0.0
+        money_ratio = pos_mf / neg_mf
+        return 100 - (100 / (1 + money_ratio))
+
+    @staticmethod
     def _compute_trend(closes: list) -> str:
         """Compute trend from closing prices using EMA8/EMA21 (legacy label)."""
         if len(closes) < 21:
@@ -825,12 +856,13 @@ class StrategyEngine:
                 f"combined={combined:+.2f} ({combined_label})"
             )
 
-        # Refresh 15m RSI for each symbol
+        # Refresh 15m RSI + MFI for each symbol
         for symbol in self.symbol_states:
             candles = self.ws_handler.get_candle_buffer(symbol)
             if candles and len(candles) >= 15:
                 closes_15m = [c.close for c in candles[-30:]]
                 self._rsi_cache[symbol] = self._rsi(closes_15m, 14)
+                self._mfi_cache[symbol] = self._calc_mfi(candles[-30:], 14)
 
         self._htf_last_refresh = datetime.now()
 
@@ -865,11 +897,12 @@ class StrategyEngine:
             candle = msg.to_candle()
             self.ws_handler.add_candle(symbol, candle)
 
-            # Refresh RSI cache (used by HTF trend analysis)
+            # Refresh RSI + MFI cache (used by HTF trend analysis)
             candles = self.ws_handler.get_candle_buffer(symbol)
             if candles and len(candles) >= 15:
                 closes_15m = [c.close for c in candles[-30:]]
                 self._rsi_cache[symbol] = self._rsi(closes_15m, 14)
+                self._mfi_cache[symbol] = self._calc_mfi(candles[-30:], 14)
 
             # Real-time 15m trend score update from WS buffer
             self._update_15m_score_from_buffer(symbol)
@@ -1065,6 +1098,21 @@ class StrategyEngine:
             )
             return
 
+        # === MFI confirmation: volume must confirm direction ===
+        # MFI > 50 = money flowing in (bullish), MFI < 50 = money flowing out (bearish)
+        mfi = self._mfi_cache.get(symbol)
+        if mfi is not None:
+            if direction == TradeDirection.LONG and mfi < 50:
+                logger.info(
+                    f"🚫 EMA cross {symbol} LONG blocked — MFI={mfi:.1f} < 50 (no volume confirmation)"
+                )
+                return
+            if direction == TradeDirection.SHORT and mfi > 50:
+                logger.info(
+                    f"🚫 EMA cross {symbol} SHORT blocked — MFI={mfi:.1f} > 50 (no volume confirmation)"
+                )
+                return
+
         # === RSI confirmation: skip overbought BUYs and oversold SELLs ===
         rsi = self._rsi_cache.get(symbol)
         rsi_ob = self.config.trend.rsi_overbought
@@ -1197,6 +1245,7 @@ class StrategyEngine:
             f"📊 EMA CROSS: {symbol} {dir_str} | "
             f"EMA9={ema9:.6f} EMA21={ema21:.6f} EMA50={f'{ema50:.6f}' if ema50 else 'N/A'} | "
             f"price={current_price:.6f} RSI={f'{rsi:.1f}' if rsi else 'N/A'} "
+            f"MFI={f'{mfi:.1f}' if mfi else 'N/A'} "
             f"ADX={adx:.1f} [{trend_info}]"
         )
 

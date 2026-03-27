@@ -357,6 +357,7 @@ class GoldastBot:
                 if buf and len(buf) >= 15:
                     closes = [c.close for c in buf[-30:]]
                     self.strategy._rsi_cache[symbol] = self.strategy._rsi(closes, 14)
+                    self.strategy._mfi_cache[symbol] = self.strategy._calc_mfi(buf[-30:], 14)
 
                 # Detect FVG from last 3 candles
                 await self.strategy._detect_fvg_on_close(symbol)
