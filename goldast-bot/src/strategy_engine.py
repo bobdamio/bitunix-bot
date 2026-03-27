@@ -1049,6 +1049,21 @@ class StrategyEngine:
             )
             return
 
+        # === HTF trend alignment: block counter-trend entries ===
+        # 1h score determines the dominant trend; 15m EMA crosses against it are noise.
+        # LONG only when 1h >= 0 (not bearish), SHORT only when 1h <= 0 (not bullish).
+        score_1h = self._score_1h.get(symbol, 0.0)
+        if direction == TradeDirection.LONG and score_1h < -0.2:
+            logger.info(
+                f"🚫 EMA cross {symbol} LONG blocked — 1h trend={score_1h:+.2f} (bearish, counter-trend)"
+            )
+            return
+        if direction == TradeDirection.SHORT and score_1h > 0.2:
+            logger.info(
+                f"🚫 EMA cross {symbol} SHORT blocked — 1h trend={score_1h:+.2f} (bullish, counter-trend)"
+            )
+            return
+
         # === RSI confirmation: skip overbought BUYs and oversold SELLs ===
         rsi = self._rsi_cache.get(symbol)
         rsi_ob = self.config.trend.rsi_overbought
