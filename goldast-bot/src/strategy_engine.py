@@ -1076,7 +1076,7 @@ class StrategyEngine:
 
         # === ADX chop filter: skip entry in ranging/choppy market ===
         adx = self._calc_adx(candles)
-        adx_min = 15  # ADX < 15 = choppy market, EMA crosses are noise
+        adx_min = 20  # ADX < 20 = choppy market, EMA crosses are noise
         if adx < adx_min:
             logger.info(
                 f"🚫 EMA cross {symbol} {dir_str} blocked — ADX={adx:.1f} < {adx_min} (choppy market)"

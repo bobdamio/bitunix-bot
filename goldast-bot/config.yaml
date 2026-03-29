@@ -35,6 +35,7 @@ core_symbols:
   - ONTUSDT
   - KAVAUSDT
   - BRUSDT
+  - ANKRUSDT
 
 # Blacklist — permanently banned, never added by rotation
 blacklist:
@@ -229,7 +230,7 @@ tpsl:
   # FIXED 3R TP strategy: TP set on exchange at 3R, trailing only does BE protection
   # Simulation: 500 trades × Fixed 3R TP = +$129 (+$6.13/day) vs current trailing = -$77
   trailing_breakeven_at_r: 1.5  # BE at 1.5R — move SL to entry, protect capital
-  trailing_be_lock_r: 0.05      # BE SL = entry + 0.05R — almost exact breakeven (just cover spread)
+  trailing_be_lock_r: 0.30      # BE SL = entry + 0.3R — covers spread+fees, BE exits are net positive
   trailing_runner_at_r: 99.0    # DISABLED — runner never activates, TP at 3R handles exit
   trailing_be_trail_offset_r: 99.0     # DISABLED — no progressive sliding, fixed BE only
   trailing_runner_sl_distance_r: 2.0   # (inactive — runner disabled)
