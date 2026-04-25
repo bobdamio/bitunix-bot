@@ -391,52 +391,50 @@ risk:
   direction_nerf_duration_seconds: 3600  # Block timeout: 1 hour
   direction_nerf_multiplier: 3.0         # (legacy) threshold multiplier if not fully blocked
 
-# Symbol Rotation — Accumulative growth system
-# 3 tiers: Core (7 pinned) → Proven (profitable, kept) → Trial (new/cycle)
-# List starts at 15, grows to max 25 as rotation adds profitable symbols
+# Symbol Rotation — Conservative "1 trial at a time" mode
+# 3 tiers: Core (5 pinned) → Proven (earned +$2) → Trial (1 candidate, 50% size)
+# Logic: add best FVG candidate → 1st loss = remove, -$0.50 = 3-day ban, +$2 = proven
 rotation:
-  enabled: false                 # DISABLED — rotator WR=32% ate 73% of core profits (-$412 in 34 days)
-  interval_hours: 1.0            # Full FVG rescan every 1h
-  max_symbols: 13                # 10 core + up to 3 trial/proven from scanner
-  rotation_pool_size: 3          # Add up to 3 new trial symbols per rotation cycle
-  min_score: 40.0                # FVG score threshold (0-100) — 40 = proximity + quality
-  scan_top_n: 100                # Scan top 100 pairs by volume — wider search
+  enabled: true                  # ENABLED — conservative mode: 1 trial, strict filters
+  interval_hours: 4.0            # Full FVG rescan every 4h — less noise, better candidates
+  max_symbols: 6                 # 5 core + 1 trial slot
+  rotation_pool_size: 1          # Add 1 trial per cycle — focus on quality
+  min_score: 55.0                # Higher FVG score threshold — only strong setups
+  scan_top_n: 100                # Scan top 100 pairs by volume
   scan_candles: 200              # 200 × 15m = ~2 days of data per symbol
-  min_24h_volume: 1000000        # $1M min vol — Bitunix has fewer high-volume pairs
-  pnl_lookback_hours: 24         # PnL window: 24h — drop losers faster
-  protect_profitable: true       # Keep symbols with positive PnL, only replace losers
-  max_losing_trades: 3           # Remove symbol after 3 consecutive losses
-  pnl_ban_enabled: true          # Enable PnL-based ban for rotation symbols
-  pnl_ban_hours: 24              # Ban losing rotation symbols for 24h
-  pnl_ban_threshold: -1.0        # Ban any rotation symbol with PnL below -$1 (was -$2 = too lenient)
-  removed_cooldown_hours: 3.0    # Removed symbols can't come back for 3h
+  min_24h_volume: 5000000        # $5M min vol — filter low-liquidity trash
+  pnl_lookback_hours: 24         # PnL window: 24h
+  protect_profitable: true       # Keep symbols with positive PnL
+  max_losing_trades: 2           # Proven symbols: remove after 2 consecutive losses
+  pnl_ban_enabled: true          # Enable PnL-based ban
+  pnl_ban_hours: 72              # Ban losers for 3 days (was 24h = came back too fast)
+  pnl_ban_threshold: -0.50       # Ban after -$0.50 (was -$1 = too lenient for $110 balance)
+  removed_cooldown_hours: 6.0    # Removed symbols can't come back for 6h
   pnl_penalty_per_dollar: 5.0    # Score penalty: 5 pts per $1 of negative PnL
   pnl_bonus_per_dollar: 3.0      # Score bonus: 3 pts per $1 of positive PnL
-  pnl_bonus_cap: 15.0            # Max bonus points (cap prevents score inflation)
-  # Proven promotion thresholds
-  proven_min_pnl: 0.50           # Min net PnL ($) to promote to "proven" tier
-  proven_min_trades: 2           # Min trades to qualify as proven
-  proven_min_wr: 40.0            # Min WR% to promote to proven tier
-  # Trial symbol restrictions — stricter rules for unproven symbols
-  trial_min_fill: 0.25           # Trial symbols need 25% zone fill (matches entry_zone_min) — proven symbols exempt
-  trial_require_confluence: false # DISABLED — BOS/HTF soft mode already reduces size ×0.5, extra ×0.30 = ×0.15 = useless trades
-  trial_max_losing_trades: 2     # Remove trial after 2 losses — give trials a fair chance (1 loss = noise)
-  trial_size_multiplier: 0.5     # Trial symbols trade at 50% size — unproven = less risk
-  # Pipeline signal ban (fast 2h check between full rotations)
-  signal_ban_min_active_hours: 3.0    # Must be active this long before ban eligible (was 8h)
-  signal_ban_no_hit_hours: 2.0        # Remove if no zone hit for 2h — balanced: not too aggressive (was 1.5h = kicked good symbols)
-  # Cheap coin bonus — data shows coins <$0.05 have 62% WR vs 30% on expensive coins
-  cheap_coin_threshold: 0.10          # Price threshold for bonus ($0.10)
-  cheap_coin_bonus: 3.0               # +3 score points for cheap coins
-  # Opportunity scanner — fast market-wide proximity check every 15 min
-  # Scans 50+ symbols, finds ones with price RIGHT AT an FVG zone
-  # Hot-swaps cold trial symbols for high-proximity opportunities
-  opportunity_scan_enabled: false      # DISABLED — scanner added trial symbols with WR=32%, ate 73% of core profits
-  opportunity_scan_top_n: 100           # Scan top 100 symbols by volume (was 50 — too narrow, missed cheap gems)
-  opportunity_scan_candles: 100        # Fewer candles for speed (100×15m = 25h)
-  opportunity_min_proximity: 60.0      # Min actionable proximity to trigger swap (70→60 — more candidates pass)
-  opportunity_max_swaps: 3             # Max swaps per scan cycle (2→3 — faster refresh of cold symbols)
-  opportunity_min_score_advantage: 5.0   # Opportunity must beat trial by 5+ pts (10→5 — easier to replace cold symbols)
+  pnl_bonus_cap: 15.0            # Max bonus points
+  # Proven promotion — must earn its place
+  proven_min_pnl: 2.00           # Need +$2 net to promote (was $0.50 = too easy)
+  proven_min_trades: 3           # Need 3+ trades to prove consistency (was 2)
+  proven_min_wr: 50.0            # Need 50%+ WR (was 40%)
+  # Trial symbol restrictions — strict: 1 chance
+  trial_min_fill: 0.30           # Trial needs 30% zone fill
+  trial_require_confluence: false # Confluence handled by strategy engine
+  trial_max_losing_trades: 1     # 1 loss = removed immediately (was 2)
+  trial_size_multiplier: 0.5     # 50% position size for trials
+  # Pipeline signal ban
+  signal_ban_min_active_hours: 4.0    # Must be active 4h before ban check
+  signal_ban_no_hit_hours: 3.0        # Remove if no zone hit for 3h
+  # Cheap coin bonus
+  cheap_coin_threshold: 0.10          # Price threshold for bonus
+  cheap_coin_bonus: 3.0               # +3 score for cheap coins
+  # Opportunity scanner — DISABLED (was adding trash)
+  opportunity_scan_enabled: false
+  opportunity_scan_top_n: 100
+  opportunity_scan_candles: 100
+  opportunity_min_proximity: 60.0
+  opportunity_max_swaps: 1             # Max 1 swap if re-enabled
+  opportunity_min_score_advantage: 10.0
 
 # Mean Reversion — activates when ADX < 20 (ranging market)
 # Bollinger Band(20, 2.5σ) + RSI ≤ 30 → LONG at lower band, SHORT at upper band
