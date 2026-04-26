@@ -81,8 +81,9 @@ blacklist:
   - AAVEUSDT           # Apr 2-23: WR=47%, PnL=-$19.81 — worst core symbol, avg hold 124m
   - DOGEUSDT           # Apr KZ: Net=-$3.73. LONG 75%=great but SHORT 30%=-$7.68 destroys profit
   - BNBUSDT            # Apr KZ: Net=-$0.37. No edge — zero expectancy, not worth the fees
+  - API3USDT           # Lowcap ($0.35), only triggers MR trash, FVG fill 38% = never trades FVG
 
-# Trading Symbols (5 symbols — rotation Apr 26 05:08)
+# Trading Symbols (5 symbols — rotation Apr 26 08:45)
 symbols:
   - BTCUSDT
   - ETHUSDT
@@ -402,7 +403,7 @@ rotation:
   min_score: 55.0                # Higher FVG score threshold — only strong setups
   scan_top_n: 100                # Scan top 100 pairs by volume
   scan_candles: 200              # 200 × 15m = ~2 days of data per symbol
-  min_24h_volume: 5000000        # $5M min vol — filter low-liquidity trash
+  min_24h_volume: 10000000       # $10M min vol — filter low-liquidity trash
   pnl_lookback_hours: 24         # PnL window: 24h
   protect_profitable: true       # Keep symbols with positive PnL
   max_losing_trades: 2           # Proven symbols: remove after 2 consecutive losses
@@ -425,9 +426,9 @@ rotation:
   # Pipeline signal ban
   signal_ban_min_active_hours: 4.0    # Must be active 4h before ban check
   signal_ban_no_hit_hours: 3.0        # Remove if no zone hit for 3h
-  # Cheap coin bonus
-  cheap_coin_threshold: 0.10          # Price threshold for bonus
-  cheap_coin_bonus: 3.0               # +3 score for cheap coins
+  # Cheap coin bonus — DISABLED (was rewarding lowcap junk)
+  cheap_coin_threshold: 0.00          # Disabled — no bonus for cheap coins
+  cheap_coin_bonus: 0.0               # Disabled
   # Opportunity scanner — DISABLED (was adding trash)
   opportunity_scan_enabled: false
   opportunity_scan_top_n: 100
