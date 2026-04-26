@@ -39,6 +39,7 @@ class PositionManager:
         symbol_states: Dict[str, SymbolState],
         trade_history: Optional['TradeHistory'] = None,
         strategy_engine=None,  # back-reference for loss cooldown tracking
+        blacklist: Optional[list] = None,
     ):
         self.exchange = exchange
         self.ws_handler = ws_handler
@@ -49,6 +50,7 @@ class PositionManager:
         self.trade_history = trade_history or TradeHistory()
         self._strategy = strategy_engine  # set after construction via set_strategy()
         self._telegram = None  # set after construction via set_telegram()
+        self._blacklist: set = set(blacklist or [])
         self._open_positions_path = Path("data/open_positions.json")
 
     def set_telegram(self, telegram_bot) -> None:
@@ -149,13 +151,20 @@ class PositionManager:
                 symbol = pos.get("symbol", "")
                 is_orphan = symbol not in self.symbol_states
                 if is_orphan:
-                    # Orphan position: symbol was rotated out but position is still open.
-                    # Create temporary SymbolState so trailing/BE can manage it.
-                    logger.warning(
-                        f"🔀 [SYNC] Orphan position found: {symbol} not in active symbols "
-                        f"— creating state for trailing management"
-                    )
+                    if symbol in self._blacklist:
+                        logger.warning(
+                            f"🚫 [SYNC] Orphan position for BLACKLISTED {symbol} — "
+                            f"will manage trailing/close but NOT open new trades"
+                        )
+                    else:
+                        logger.warning(
+                            f"🔀 [SYNC] Orphan position found: {symbol} not in active symbols "
+                            f"— creating state for trailing management"
+                        )
+                    # Create state for trailing management regardless (to close gracefully)
                     self.symbol_states[symbol] = SymbolState(symbol=symbol)
+                    if symbol in self._blacklist:
+                        self.symbol_states[symbol]._blacklisted = True
 
                 state = self.symbol_states[symbol]
                 position_id = str(pos.get("positionId", ""))
@@ -343,11 +352,19 @@ class PositionManager:
 
                 # Orphan position: symbol not in symbol_states but has open position
                 if sym not in self.symbol_states:
-                    logger.warning(
-                        f"🔀 [SYNC] Orphan position detected: {sym} — "
-                        f"creating state for trailing management"
-                    )
+                    if sym in self._blacklist:
+                        logger.warning(
+                            f"🚫 [SYNC] Orphan position for BLACKLISTED {sym} — "
+                            f"will manage trailing/close but NOT open new trades"
+                        )
+                    else:
+                        logger.warning(
+                            f"🔀 [SYNC] Orphan position detected: {sym} — "
+                            f"creating state for trailing management"
+                        )
                     self.symbol_states[sym] = SymbolState(symbol=sym)
+                    if sym in self._blacklist:
+                        self.symbol_states[sym]._blacklisted = True
                     mark = float(pos.get("markPrice") or pos.get("lastPrice") or 0)
                     state = self.symbol_states[sym]
                     state.last_price = mark
@@ -443,7 +460,7 @@ class PositionManager:
                         )
                         if history:
                             pos_id = old_order.get("position_id")
-                            for h in history[:5]:
+                            for h in history:  # search ALL, not [:5]
                                 if str(h.get("positionId")) == str(pos_id):
                                     close_price = float(h.get("closePrice", 0))
                                     pnl = float(h.get("realizedPNL", 0))
@@ -727,7 +744,7 @@ class PositionManager:
             if not pos_id:
                 return None
             history = await self.exchange.get_history_positions(symbol)
-            for h in (history or [])[:5]:
+            for h in (history or []):  # search ALL, not [:5]
                 if str(h.get("positionId")) == str(pos_id):
                     pnl = float(h.get("realizedPNL", h.get("realizedPnl", 0)))
                     return pnl
@@ -829,17 +846,69 @@ class PositionManager:
         self, symbol: str, order_info: Optional[dict]
     ) -> None:
         """Fetch closed position from exchange history and record it."""
-        try:
-            pos_id = (order_info or {}).get("position_id")
-            if not pos_id:
-                return
-            history = await self.exchange.get_history_positions(symbol)
-            for h in (history or [])[:5]:
-                if str(h.get("positionId")) == str(pos_id):
-                    self.trade_history.record_trade(h)
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                pos_id = (order_info or {}).get("position_id")
+                history = await self.exchange.get_history_positions(symbol)
+                if not history:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2.0)
+                        continue
+                    logger.warning(f"No history returned for {symbol} after {max_retries} attempts")
                     return
+
+                # Search by position_id if available
+                if pos_id:
+                    for h in history:  # search ALL, not [:5]
+                        if str(h.get("positionId")) == str(pos_id):
+                            self.trade_history.record_trade(h)
+                            return
+                    logger.warning(
+                        f"Position {pos_id} not found in {len(history)} history items for {symbol}"
+                    )
+                else:
+                    # No position_id — record any unknown trades for this symbol
+                    logger.warning(f"No position_id for {symbol} — scanning history for unrecorded trades")
+                    recorded = 0
+                    for h in history:
+                        pid = str(h.get("positionId", ""))
+                        if pid and pid not in self.trade_history.known_position_ids:
+                            self.trade_history.record_trade(h)
+                            recorded += 1
+                            if recorded >= 3:  # limit to avoid recording stale trades
+                                break
+                    if recorded:
+                        logger.info(f"Recorded {recorded} orphan trade(s) for {symbol}")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to record trade for {symbol} (attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2.0)
+
+    # ==================== Trade History Reconciliation ====================
+
+    async def reconcile_trade_history(self) -> None:
+        """Periodic fallback: fetch ALL closed positions from exchange
+        and record any the bot missed (WS gap, restart, race condition).
+        Called from the main loop every few minutes."""
+        try:
+            history = await self.exchange.get_history_positions()  # no symbol filter = all
+            if not history:
+                return
+            recorded = 0
+            for h in history:
+                pid = str(h.get("positionId", ""))
+                if pid and pid not in self.trade_history.known_position_ids:
+                    self.trade_history.record_trade(h)
+                    recorded += 1
+            if recorded:
+                logger.info(
+                    f"🔄 [RECONCILE] Recorded {recorded} previously-unknown trade(s) "
+                    f"from exchange history"
+                )
         except Exception as e:
-            logger.warning(f"Failed to record trade for {symbol}: {e}")
+            logger.warning(f"Trade history reconciliation failed: {e}")
 
     # ==================== Balance ====================
 

@@ -1317,6 +1317,736 @@ class SymbolRotation:
                 )
         return results
 
+    # ==================== EMA-based Scanner ====================
+
+    @staticmethod
+    def _ema_val(values: list, period: int) -> float:
+        """Calculate single EMA value from a list of floats."""
+        if len(values) < period:
+            return values[-1] if values else 0.0
+        k = 2 / (period + 1)
+        r = values[0]
+        for v in values[1:]:
+            r = v * k + r * (1 - k)
+        return r
+
+    @staticmethod
+    def _calc_adx_from_candles(candles: list, period: int = 14) -> float:
+        """Calculate ADX from candle dicts with h/l/c keys."""
+        n = len(candles)
+        if n < period + 2:
+            return 0.0
+        plus_dm, minus_dm, trs = [], [], []
+        for i in range(1, n):
+            h, l = candles[i]['h'], candles[i]['l']
+            ph, pl, pc = candles[i-1]['h'], candles[i-1]['l'], candles[i-1]['c']
+            up, down = h - ph, pl - l
+            plus_dm.append(up if up > down and up > 0 else 0)
+            minus_dm.append(down if down > up and down > 0 else 0)
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        k = 2 / (period + 1)
+        atr = sum(trs[:period]) / period
+        plus = sum(plus_dm[:period]) / period
+        minus = sum(minus_dm[:period]) / period
+        dx_list = []
+        for i in range(period, len(trs)):
+            atr = trs[i] * k + atr * (1 - k)
+            plus = plus_dm[i] * k + plus * (1 - k)
+            minus = minus_dm[i] * k + minus * (1 - k)
+            pdi = (plus / atr) * 100 if atr > 0 else 0
+            mdi = (minus / atr) * 100 if atr > 0 else 0
+            ds = pdi + mdi
+            dx_list.append(abs(pdi - mdi) / ds * 100 if ds > 0 else 0)
+        if not dx_list:
+            return 0.0
+        adx = dx_list[0]
+        for dx in dx_list[1:]:
+            adx = dx * k + adx * (1 - k)
+        return adx
+
+    @staticmethod
+    def _calc_mfi_from_candles(candles: list, period: int = 14) -> float:
+        """Calculate MFI from candle dicts."""
+        if len(candles) < period + 1:
+            return 50.0
+        pos, neg = 0.0, 0.0
+        for i in range(-period, 0):
+            tp = (candles[i]['h'] + candles[i]['l'] + candles[i]['c']) / 3
+            ptp = (candles[i-1]['h'] + candles[i-1]['l'] + candles[i-1]['c']) / 3
+            mf = tp * candles[i]['v']
+            if tp > ptp:
+                pos += mf
+            elif tp < ptp:
+                neg += mf
+        if neg == 0:
+            return 100.0
+        return 100 - 100 / (1 + pos / neg)
+
+    @staticmethod
+    def _calc_rsi_from_closes(closes: list, period: int = 14) -> float:
+        """Calculate RSI from close prices."""
+        if len(closes) < period + 1:
+            return 50.0
+        g, lo = [], []
+        for i in range(1, len(closes)):
+            ch = closes[i] - closes[i-1]
+            g.append(max(ch, 0))
+            lo.append(max(-ch, 0))
+        ag = sum(g[:period]) / period
+        al = sum(lo[:period]) / period
+        for i in range(period, len(g)):
+            ag = (ag * (period - 1) + g[i]) / period
+            al = (al * (period - 1) + lo[i]) / period
+        if al == 0:
+            return 100.0
+        return 100 - 100 / (1 + ag / al)
+
+    @staticmethod
+    def _calc_htf_score_from_candles(candles: list) -> float:
+        """HTF trend score: price vs EMA(20) scaled to [-1, 1]."""
+        if len(candles) < 20:
+            return 0.0
+        closes = [c['c'] for c in candles]
+        e = SymbolRotation._ema_val(closes, 20)
+        if e == 0:
+            return 0.0
+        return max(-1.0, min(1.0, (closes[-1] - e) / e * 10))
+
+    @staticmethod
+    def _backtest_ema_symbol(
+        candles: list,
+        tp_r: float = 2.5,
+        sl_atr_mult: float = 1.5,
+        adx_min: float = 20.0,
+        risk_usd: float = 1.26,
+        fee_rate: float = 0.0006,
+    ) -> Dict:
+        """Run EMA(5/13) crossover backtest on candle data.
+
+        Matches the live bot's entry logic exactly:
+        - EMA(5) crosses EMA(13)
+        - ADX >= 20
+        - MFI confirms direction (>50 LONG, <50 SHORT)
+        - RSI not overbought/oversold (75/25)
+        - HTF trend alignment ±0.3 (1h proxy via EMA(20) of last 80 candles)
+        - SL = 1.5 × ATR, TP = tp_r × SL
+        - NO breakeven (disabled in live bot)
+
+        Returns dict with backtest metrics.
+        """
+        n = len(candles)
+        if n < 50:
+            return {'trades': 0, 'wins': 0, 'losses': 0, 'pnl': 0.0,
+                    'avg_r': 0.0, 'win_rate': 0.0, 'signals': 0,
+                    'avg_adx': 0.0, 'ema_proximity': 0.0}
+
+        closes = [c['c'] for c in candles]
+        trades = []
+        open_trade = None
+        cooldown_until = 0
+        signal_count = 0
+
+        for i in range(30, n):
+            # Manage open trade first
+            if open_trade is not None:
+                c = candles[i]
+                t = open_trade
+                is_long = t['dir'] == 'LONG'
+                risk = t['risk']
+
+                # Track MFE
+                fav = ((c['h'] - t['entry']) if is_long else (t['entry'] - c['l'])) / risk if risk > 0 else 0
+                t['mfe'] = max(t.get('mfe', 0), fav)
+
+                sl_hit = (c['l'] <= t['sl']) if is_long else (c['h'] >= t['sl'])
+                tp_hit = (c['h'] >= t['tp']) if is_long else (c['l'] <= t['tp'])
+
+                if sl_hit and tp_hit:
+                    # Both hit — assume SL first if open is closer to SL
+                    sl_dist = abs(c['o'] - t['sl'])
+                    tp_dist = abs(c['o'] - t['tp'])
+                    if sl_dist <= tp_dist:
+                        sl_hit, tp_hit = True, False
+                    else:
+                        sl_hit, tp_hit = False, True
+
+                if sl_hit:
+                    exit_p = t['sl']
+                    r_mult = ((exit_p - t['entry']) / risk if is_long
+                              else (t['entry'] - exit_p) / risk) if risk > 0 else 0
+                    notional = risk_usd / (risk / t['entry']) if risk > 0 else 0
+                    pnl = risk_usd * r_mult - notional * fee_rate * 2
+                    trades.append({
+                        'r': r_mult, 'pnl': pnl, 'reason': 'SL',
+                        'mfe': t['mfe'], 'dir': t['dir'],
+                    })
+                    open_trade = None
+                    cooldown_until = i + 4
+                elif tp_hit:
+                    exit_p = t['tp']
+                    r_mult = ((exit_p - t['entry']) / risk if is_long
+                              else (t['entry'] - exit_p) / risk) if risk > 0 else 0
+                    notional = risk_usd / (risk / t['entry']) if risk > 0 else 0
+                    pnl = risk_usd * r_mult - notional * fee_rate * 2
+                    trades.append({
+                        'r': r_mult, 'pnl': pnl, 'reason': 'TP',
+                        'mfe': t['mfe'], 'dir': t['dir'],
+                    })
+                    open_trade = None
+                    cooldown_until = i + 1
+                continue
+
+            if i < cooldown_until:
+                continue
+
+            # Signal detection
+            s = closes[:i+1]
+            prev_s = closes[:i]
+            e5 = SymbolRotation._ema_val(s, 5)
+            e13 = SymbolRotation._ema_val(s, 13)
+            pe5 = SymbolRotation._ema_val(prev_s, 5)
+            pe13 = SymbolRotation._ema_val(prev_s, 13)
+
+            direction = None
+            if pe5 <= pe13 and e5 > e13:
+                direction = 'LONG'
+            elif pe5 >= pe13 and e5 < e13:
+                direction = 'SHORT'
+            if not direction:
+                continue
+
+            signal_count += 1
+
+            # Filter: ADX
+            cs = candles[:i+1]
+            adx = SymbolRotation._calc_adx_from_candles(cs)
+            if adx < adx_min:
+                continue
+
+            # Filter: MFI
+            mfi = SymbolRotation._calc_mfi_from_candles(cs)
+            if direction == 'LONG' and mfi < 50:
+                continue
+            if direction == 'SHORT' and mfi > 50:
+                continue
+
+            # Filter: RSI
+            rsi = SymbolRotation._calc_rsi_from_closes(s)
+            if direction == 'LONG' and rsi > 75:
+                continue
+            if direction == 'SHORT' and rsi < 25:
+                continue
+
+            # Filter: HTF trend
+            htf = SymbolRotation._calc_htf_score_from_candles(cs[-80:])
+            if direction == 'LONG' and htf < -0.3:
+                continue
+            if direction == 'SHORT' and htf > 0.3:
+                continue
+
+            # Entry
+            entry = candles[i]['c']
+            atr = SymbolRotation._calculate_atr(cs)
+            atr = max(atr, entry * 0.0001)
+            sl_d = atr * sl_atr_mult
+            tp_d = sl_d * tp_r
+
+            # Skip absurd SL distance
+            if sl_d / entry > 0.025:
+                continue
+
+            sl = (entry - sl_d) if direction == 'LONG' else (entry + sl_d)
+            tp = (entry + tp_d) if direction == 'LONG' else (entry - tp_d)
+
+            open_trade = {
+                'dir': direction, 'entry': entry,
+                'sl': sl, 'tp': tp, 'risk': sl_d, 'mfe': 0,
+            }
+
+        # Close remaining open trade at market
+        if open_trade is not None:
+            t = open_trade
+            exit_p = candles[-1]['c']
+            risk = t['risk']
+            is_long = t['dir'] == 'LONG'
+            r_mult = ((exit_p - t['entry']) / risk if is_long
+                      else (t['entry'] - exit_p) / risk) if risk > 0 else 0
+            # Don't count still-open trade in stats
+
+        # Compute metrics
+        closed = trades
+        wins = [t for t in closed if t['reason'] == 'TP']
+        losses = [t for t in closed if t['reason'] == 'SL']
+        total_pnl = sum(t['pnl'] for t in closed)
+        total = len(closed)
+        win_rate = (len(wins) / total * 100) if total > 0 else 0.0
+        avg_r = (sum(t['r'] for t in closed) / total) if total > 0 else 0.0
+
+        # EMA proximity: how close EMA5 and EMA13 are right now (lower = cross imminent)
+        e5_now = SymbolRotation._ema_val(closes, 5)
+        e13_now = SymbolRotation._ema_val(closes, 13)
+        price_now = closes[-1]
+        ema_gap_pct = abs(e5_now - e13_now) / price_now * 100 if price_now > 0 else 99
+
+        # Average ADX over last 50 candles
+        avg_adx = SymbolRotation._calc_adx_from_candles(candles[-64:]) if n >= 64 else 0
+
+        # Directional accuracy — of all signals, what % went in right direction?
+        dir_correct = sum(1 for t in closed if t['r'] > 0)
+        dir_accuracy = (dir_correct / total * 100) if total > 0 else 0.0
+
+        # Signal density — signals per 100 candles
+        period_candles = n - 30  # first 30 can't generate signals
+        signal_density = (signal_count / period_candles * 100) if period_candles > 0 else 0
+
+        # Recent signals — in last 50 candles
+        # (approximated: we don't track individual signal indices, use signal rate)
+        hours = period_candles * 15 / 60  # 15-min candles
+        signals_per_10h = (signal_count / hours * 10) if hours > 0 else 0
+
+        return {
+            'trades': total,
+            'wins': len(wins),
+            'losses': len(losses),
+            'pnl': total_pnl,
+            'avg_r': avg_r,
+            'win_rate': win_rate,
+            'signals': signal_count,
+            'signal_density': signal_density,
+            'signals_per_10h': signals_per_10h,
+            'avg_adx': avg_adx,
+            'ema_proximity': ema_gap_pct,
+            'dir_accuracy': dir_accuracy,
+        }
+
+    @staticmethod
+    def _compute_ema_score(metrics: Dict, vol_24h: float, min_vol: float = 10_000_000) -> float:
+        """Composite EMA scanner score (0–100).
+
+        Weights:
+        - Signal Quality (40pts): win rate, PnL, avg R
+        - Activity (25pts): signal count, ADX, directional accuracy
+        - Liquidity (20pts): volume, ATR
+        - Actionability (15pts): EMA proximity (cross imminent?)
+
+        Hard gates:
+        - 0 trades → reject
+        - Win rate < 25% → reject
+        - Average R < -0.5 → reject (consistently loses)
+        """
+        total = metrics.get('trades', 0)
+        if total == 0:
+            return 0.0
+
+        wr = metrics.get('win_rate', 0)
+        if wr < 25:
+            return 0.0
+
+        avg_r = metrics.get('avg_r', 0)
+        if avg_r < -0.5:
+            return 0.0
+
+        pnl = metrics.get('pnl', 0)
+        if pnl < 0:
+            return 0.0  # Only select coins that were profitable in backtest
+
+        score = 0.0
+
+        # ═══════ SIGNAL QUALITY (40pts) ═══════
+        # Win rate (20pts)
+        if wr >= 60:
+            score += 20
+        elif wr >= 50:
+            score += 16
+        elif wr >= 40:
+            score += 12
+        elif wr >= 30:
+            score += 6
+        else:
+            score += 2
+
+        # PnL magnitude (12pts) — more $ = better
+        if pnl >= 5.0:
+            score += 12
+        elif pnl >= 2.0:
+            score += 9
+        elif pnl >= 1.0:
+            score += 6
+        elif pnl >= 0.5:
+            score += 4
+        elif pnl > 0:
+            score += 2
+
+        # Avg R multiple (8pts)
+        if avg_r >= 0.5:
+            score += 8
+        elif avg_r >= 0.3:
+            score += 6
+        elif avg_r >= 0.1:
+            score += 4
+        elif avg_r >= 0:
+            score += 2
+
+        # ═══════ ACTIVITY (25pts) ═══════
+        # Trade count (12pts) — need enough data
+        if total >= 8:
+            score += 12
+        elif total >= 5:
+            score += 9
+        elif total >= 3:
+            score += 6
+        elif total >= 2:
+            score += 4
+        else:
+            score += 1
+
+        # ADX level (8pts) — higher = stronger trends
+        adx = metrics.get('avg_adx', 0)
+        if adx >= 30:
+            score += 8
+        elif adx >= 25:
+            score += 6
+        elif adx >= 20:
+            score += 4
+        elif adx >= 15:
+            score += 2
+
+        # Directional accuracy (5pts)
+        da = metrics.get('dir_accuracy', 0)
+        if da >= 60:
+            score += 5
+        elif da >= 50:
+            score += 3
+        elif da >= 40:
+            score += 1
+
+        # ═══════ LIQUIDITY (20pts) ═══════
+        # Volume 24h (12pts)
+        if vol_24h >= 100_000_000:
+            score += 12
+        elif vol_24h >= 50_000_000:
+            score += 9
+        elif vol_24h >= 20_000_000:
+            score += 6
+        elif vol_24h >= min_vol:
+            score += 3
+
+        # ATR fitness (8pts) — want 0.3-1.5% (good movement, not crazy)
+        atr_pct = metrics.get('atr_pct', 0)
+        if 0.3 <= atr_pct <= 1.5:
+            score += 8
+        elif 0.2 <= atr_pct <= 2.0:
+            score += 5
+        elif 0.1 <= atr_pct <= 3.0:
+            score += 2
+
+        # ═══════ ACTIONABILITY (15pts) ═══════
+        # EMA proximity — closer EMAs = cross more likely soon
+        ema_gap = metrics.get('ema_proximity', 99)
+        if ema_gap <= 0.05:
+            score += 15  # Basically touching — cross imminent
+        elif ema_gap <= 0.1:
+            score += 12
+        elif ema_gap <= 0.2:
+            score += 8
+        elif ema_gap <= 0.5:
+            score += 4
+        elif ema_gap <= 1.0:
+            score += 2
+
+        return round(score, 1)
+
+    async def scan_ema_symbols(
+        self,
+        top_n: int = 50,
+        candle_count: int = 200,
+    ) -> List[ScanResult]:
+        """Scan top-volume pairs using EMA crossover backtest.
+
+        Replaces FVG-based scan_all_symbols() for EMA strategy.
+        Downloads candles, runs EMA(9/26) crossover simulation with
+        all filters (ADX, MFI, RSI, HTF), and scores by profitability.
+
+        Args:
+            top_n: How many top-volume pairs to scan
+            candle_count: Number of 15m candles per symbol
+
+        Returns:
+            List of ScanResult sorted by score descending
+        """
+        # Get all tickers sorted by volume
+        try:
+            tickers = await self.exchange._api._request(
+                "GET", "/api/v1/futures/market/tickers", {}
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch tickers for EMA scan: {e}")
+            return []
+
+        if not isinstance(tickers, list):
+            return []
+
+        # Filter & sort by volume
+        for t in tickers:
+            t["_vol"] = float(t.get("quoteVol", 0) or 0)
+            t["_price"] = float(t.get("lastPrice", 0) or 0)
+        min_vol = getattr(self.config.rotation, 'min_24h_volume', 10_000_000)
+        tickers = [
+            t for t in tickers
+            if t["_vol"] >= min_vol
+            and t.get("symbol", "").endswith("USDT")
+            and t.get("symbol", "") not in self._blacklist
+        ]
+
+        # Deduplicate base assets
+        seen_bases: set = set()
+        deduped: list = []
+        tickers.sort(key=lambda x: x["_vol"], reverse=True)
+        for t in tickers:
+            sym = t.get("symbol", "")
+            base = sym.replace("USDT", "")
+            if base not in seen_bases:
+                seen_bases.add(base)
+                deduped.append(t)
+        candidates = deduped[:top_n]
+
+        logger.info(f"🔍 EMA scan: {len(candidates)} pairs (vol ≥ ${min_vol/1e6:.0f}M)")
+
+        # TP from config (matches live bot)
+        tp_r = getattr(self.config.tpsl, 'force_close_at_r', 2.0)
+        scan_interval = "15min"
+
+        results: List[ScanResult] = []
+        skipped = {"no_candles": 0, "no_trades": 0, "low_score": 0}
+
+        for t in candidates:
+            symbol = t["symbol"]
+            try:
+                raw = await self.exchange._api.get_klines(
+                    symbol=symbol, interval=scan_interval, limit=candle_count,
+                )
+                if not isinstance(raw, list) or len(raw) < 50:
+                    skipped["no_candles"] += 1
+                    continue
+
+                # Parse candles
+                candles = []
+                for c in raw:
+                    if isinstance(c, dict):
+                        candles.append({
+                            "t": int(c.get("time", c.get("t", c.get("ts", 0)))),
+                            "o": float(c.get("open", c.get("o", 0))),
+                            "h": float(c.get("high", c.get("h", 0))),
+                            "l": float(c.get("low", c.get("l", 0))),
+                            "c": float(c.get("close", c.get("c", 0))),
+                            "v": float(c.get("baseVol", c.get("volume", c.get("v", c.get("vol", c.get("quoteVol", 0)))))),
+                        })
+                    elif isinstance(c, (list, tuple)) and len(c) >= 6:
+                        candles.append({
+                            "t": int(c[0]), "o": float(c[1]), "h": float(c[2]),
+                            "l": float(c[3]), "c": float(c[4]), "v": float(c[5]),
+                        })
+                candles.sort(key=lambda x: x["t"])
+
+                # Run EMA backtest
+                metrics = self._backtest_ema_symbol(
+                    candles, tp_r=tp_r,
+                )
+
+                if metrics['trades'] == 0:
+                    skipped["no_trades"] += 1
+                    continue
+
+                # ATR for scoring
+                price = candles[-1]["c"]
+                atr = self._calculate_atr(candles)
+                atr_pct = (atr / price * 100) if price > 0 else 0
+                metrics['atr_pct'] = atr_pct
+
+                # Score
+                score = self._compute_ema_score(metrics, t["_vol"], min_vol)
+                if score <= 0:
+                    skipped["low_score"] += 1
+                    continue
+
+                # Map to ScanResult (reuse fields where meaningful)
+                results.append(ScanResult(
+                    symbol=symbol,
+                    score=score,
+                    price=price,
+                    vol_24h=t["_vol"],
+                    fvg_density=metrics['signal_density'],      # signal density
+                    fill_rate=metrics['win_rate'],               # win rate at 2R
+                    bounce_rate=metrics['dir_accuracy'],         # directional accuracy
+                    atr_pct=atr_pct,
+                    vol_spike=0.0,
+                    trend_clarity=min(metrics['avg_adx'] / 50, 1.0),
+                    wick_body=0.0,
+                    avg_r_achieved=metrics['avg_r'],
+                    trend_aligned_pct=metrics['dir_accuracy'],
+                    signal_rate=metrics['signals_per_10h'],
+                    avg_vol_ratio=0.0,
+                    proximity_score=max(0, 100 - metrics['ema_proximity'] * 100),
+                    recent_fvg_pct=0.0,
+                    retest_speed=0.0,
+                    zone_approach_rate=0.0,
+                    current_trend_strength=metrics['avg_adx'] / 100,
+                    actionable_proximity=max(0, 100 - metrics['ema_proximity'] * 100),
+                    actionable_zone_count=metrics['trades'],
+                    bos_aligned_count=0,
+                    htf_confluent_count=0,
+                    convergence_score=max(0, 100 - metrics['ema_proximity'] * 50),
+                ))
+            except Exception as e:
+                logger.debug(f"EMA scan error for {symbol}: {e}")
+
+            await asyncio.sleep(0.15)  # rate limit
+
+        results.sort(key=lambda x: x.score, reverse=True)
+
+        logger.info(
+            f"📊 EMA scan results: {len(results)} passed / {len(candidates)} scanned | "
+            f"rejected: no_candles={skipped['no_candles']} "
+            f"no_trades={skipped['no_trades']} low_score={skipped['low_score']}"
+        )
+        if results:
+            for r in results[:20]:
+                logger.info(
+                    f"  {r.symbol:<14} score={r.score:.1f} "
+                    f"WR={r.fill_rate:.0f}% trades={r.actionable_zone_count} "
+                    f"avgR={r.avg_r_achieved:+.2f} sig/10h={r.signal_rate:.1f} "
+                    f"ADX={r.current_trend_strength*100:.0f} "
+                    f"EMA_gap={100-r.actionable_proximity:.1f}% "
+                    f"vol=${r.vol_24h/1e6:.0f}M"
+                )
+        return results
+
+    async def opportunity_scan_ema(
+        self,
+        symbol_states: dict,
+        ws_handler,
+        signal_tracker=None,
+    ) -> Optional[List[str]]:
+        """Fast EMA-based opportunity scan every 15 min.
+
+        Scans market for symbols where EMA(5) and EMA(13) are very close
+        (cross imminent), then runs a quick backtest to verify profitability.
+        Swaps in the best opportunities replacing worst cold trials.
+        """
+        rot_cfg = self.config.rotation
+        if not getattr(rot_cfg, 'opportunity_scan_enabled', True):
+            return None
+
+        top_n = getattr(rot_cfg, 'opportunity_scan_top_n', 50)
+        max_swaps = getattr(rot_cfg, 'opportunity_max_swaps', 2)
+        min_score_advantage = getattr(rot_cfg, 'opportunity_min_score_advantage', 10.0)
+
+        # Trial symbols (candidates for swap-out)
+        trial_symbols = [
+            sym for sym in symbol_states
+            if sym not in self._pinned_symbols
+            and sym not in self._proven_symbols
+            and not symbol_states[sym].has_position
+        ]
+
+        if not trial_symbols:
+            return None
+
+        # Fast scan with fewer candles
+        logger.info(f"🎯 EMA opportunity scan: {top_n} symbols...")
+        results = await self.scan_ema_symbols(
+            top_n=top_n,
+            candle_count=100,  # Fewer candles for speed
+        )
+
+        if not results:
+            logger.info("🎯 EMA opportunity scan: no results")
+            return None
+
+        # Find opportunities not in current list
+        current_symbols = set(symbol_states.keys())
+        min_score = rot_cfg.min_score
+        min_vol = getattr(rot_cfg, 'min_24h_volume', 10_000_000)
+
+        opportunities = [
+            r for r in results
+            if r.symbol not in current_symbols
+            and r.symbol not in self._blacklist
+            and r.symbol not in self._pnl_ban_until
+            and r.symbol not in self._removed_cooldown
+            and r.score >= min_score
+            and r.vol_24h >= min_vol
+        ]
+
+        if not opportunities:
+            best = max(
+                (r for r in results if r.symbol not in current_symbols),
+                key=lambda r: r.score, default=None,
+            )
+            best_info = f"best={best.symbol} score={best.score:.1f}" if best else "none"
+            logger.info(f"🎯 EMA opportunity: no candidates ({best_info})")
+            return None
+
+        # Score current trials from scan
+        trial_scores = {}
+        for sym in trial_symbols:
+            scan_r = next((r for r in results if r.symbol == sym), None)
+            trial_scores[sym] = scan_r.score if scan_r else 0.0
+
+        worst_trials = sorted(trial_symbols, key=lambda s: trial_scores.get(s, 0))
+
+        # Match opportunities with worst trials
+        added = set()
+        removed = set()
+        swaps = 0
+
+        for opp in sorted(opportunities, key=lambda r: r.score, reverse=True):
+            if swaps >= max_swaps or not worst_trials:
+                break
+            worst_sym = worst_trials[0]
+            worst_score = trial_scores.get(worst_sym, 0)
+            if opp.score > worst_score + min_score_advantage:
+                worst_trials.pop(0)
+                added.add(opp.symbol)
+                removed.add(worst_sym)
+                swaps += 1
+                logger.info(
+                    f"  🎯 EMA swap: {worst_sym} (score={worst_score:.1f}) "
+                    f"→ {opp.symbol} (score={opp.score:.1f})"
+                )
+
+        if not added:
+            logger.info(
+                f"🎯 EMA opportunity: {len(opportunities)} found but "
+                f"none beats trials by >{min_score_advantage:.0f}pts"
+            )
+            return None
+
+        # Apply swap
+        score_map = {r.symbol: r.score for r in results}
+        new_list = sorted((current_symbols - removed) | added)
+
+        now = datetime.now()
+        cooldown_hours = getattr(rot_cfg, 'removed_cooldown_hours', 3.0)
+        for sym in removed:
+            self._removed_cooldown[sym] = now
+
+        await self._apply_rotation(
+            new_list=new_list,
+            removed=removed,
+            added=added,
+            symbol_states=symbol_states,
+            ws_handler=ws_handler,
+            score_map=score_map,
+            signal_tracker=signal_tracker,
+        )
+
+        logger.info(
+            f"🎯 EMA opportunity done: {len(added)} swaps | "
+            f"out={sorted(removed)} | in={sorted(added)}"
+        )
+        return list(added)
+
     # ==================== Rotation Logic ====================
 
     async def maybe_rotate(
@@ -1431,6 +2161,23 @@ class SymbolRotation:
             if state.has_position:
                 protected.add(sym)
                 protect_reasons[sym] = "open position"
+                continue
+
+            # Double-check exchange for positions not tracked locally
+            # (e.g. order filled but REST confirmation failed)
+            try:
+                if await self.exchange.has_open_position(sym):
+                    protected.add(sym)
+                    protect_reasons[sym] = "open position (exchange)"
+                    state.has_position = True
+                    logger.warning(
+                        f"  ⚠️ {sym}: position found on exchange but not in local state — protecting"
+                    )
+                    continue
+            except Exception as e:
+                logger.warning(f"  ⚠️ {sym}: exchange position check failed ({e}) — protecting as precaution")
+                protected.add(sym)
+                protect_reasons[sym] = "exchange check failed"
                 continue
 
             # Check consecutive losing streak -> force remove + demote
@@ -1571,7 +2318,7 @@ class SymbolRotation:
             reason = f"PnL=${pnl_data['net_pnl']:+.2f}" if pnl_data else "no trades"
             logger.info(f"  🔄 {sym}: replaceable ({reason})")
 
-        # 5. Scan all symbols
+        # 5. Scan all symbols — use FVG scanner (matches live strategy)
         results = await self.scan_all_symbols(
             top_n=rotation_cfg.scan_top_n,
             candle_count=rotation_cfg.scan_candles,
@@ -1579,7 +2326,7 @@ class SymbolRotation:
         )
 
         if not results:
-            logger.warning("Rotation scan returned no results, keeping current symbols")
+            logger.warning("FVG rotation scan returned no results, keeping current symbols")
             self._last_rotation = now
             return None
 
@@ -1812,7 +2559,11 @@ class SymbolRotation:
                 logger.info(f"  ➖ Removed {sym}")
 
         # Add new symbols
+        blacklist = set(getattr(self.config, 'blacklist', []))
         for sym in added:
+            if sym in blacklist:
+                logger.warning(f"  🚫 Skipping blacklisted {sym}")
+                continue
             if sym not in symbol_states:
                 symbol_states[sym] = SymbolState(symbol=sym)
                 logger.info(f"  ➕ Added {sym}")
@@ -1913,6 +2664,8 @@ class SymbolRotation:
             List of newly added symbols, or None if no changes.
         """
         rot_cfg = self.config.rotation
+        if not rot_cfg.enabled:
+            return None
         if not getattr(rot_cfg, 'opportunity_scan_enabled', True):
             return None
 

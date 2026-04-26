@@ -68,6 +68,9 @@ class TPSLConfig:
     trailing_tighten_at_r: float = 5.0     # At 50% TP: trail reaches mid_distance
     trailing_tighten_min_distance_r: float = 1.0  # Trail distance at tighten_at_r
     trailing_tighten_final_distance_r: float = 0.5  # Trail distance at force_close_at_r
+    # Dynamic ATR trailing — recalculate ATR on each candle close for adaptive distances
+    trailing_dynamic_atr: bool = False          # Use current ATR for trailing distances (vs fixed entry-time risk)
+    trailing_atr_clamp: float = 0.5             # Max ATR change from entry (±50%): clamp(current_atr, entry*0.5, entry*1.5)
     # Partial TP
     partial_tp_enabled: bool = True
     partial_tp_percent: float = 0.5        # Close 50% at 1R
@@ -253,6 +256,10 @@ class TrendConfig:
     score_weight_slope: float = 0.20       # EMA slope weight
     strong_trend_multiplier: float = 2.0   # Threshold × this = "STRONG" label
     trend_rescan_distance: float = 0.005   # Mid-tick FVG rescan distance (0.5%)
+    # === Adaptive Regime: auto-adjust thresholds based on ADX ===
+    adaptive_regime_enabled: bool = False   # Enable adaptive ranging/trending regime
+    ranging_adx_threshold: float = 20.0    # ADX below this = ranging market
+    ranging_trend_multiplier: float = 0.60 # In ranging: thresholds × this
     # === BOS (Break of Structure) Filter ===
     bos_enabled: bool = False         # Require BOS confirmation before entry
     bos_soft_mode: bool = False       # Soft mode: reduce size instead of blocking
@@ -356,6 +363,28 @@ class MultiSymbolConfig:
 
 
 @dataclass
+class RiskScalingConfig:
+    """Phased risk scaling: automatically increase risk% as balance grows."""
+    enabled: bool = False
+    # List of (balance_threshold, risk_percent) — applied in order, last match wins
+    # Example: [{"balance": 200, "risk": 0.025}, {"balance": 500, "risk": 0.03}]
+    phases: List[Dict[str, float]] = field(default_factory=list)
+
+
+@dataclass
+class MeanReversionConfig:
+    """Mean reversion strategy for ranging markets (ADX < threshold)."""
+    enabled: bool = False
+    adx_max: float = 20.0            # Only MR when ADX below this
+    bb_period: int = 20              # Bollinger Band SMA period
+    bb_std: float = 2.5              # Bollinger Band std dev multiplier
+    rsi_entry: float = 30.0          # RSI threshold: LONG when RSI <= this
+    sl_pct: float = 0.010            # SL distance as % of price
+    tp_pct: float = 0.015            # TP distance as % of price
+    max_hold_candles: int = 50       # Max hold time in candles
+
+
+@dataclass
 class Config:
     """Main configuration container"""
     api: APIConfig
@@ -378,6 +407,8 @@ class Config:
     risk: RiskConfig
     trend: TrendConfig
     rotation: RotationConfig
+    mean_reversion: MeanReversionConfig
+    risk_scaling: RiskScalingConfig = field(default_factory=RiskScalingConfig)
     database_path: str = "goldast_bot.db"
     dry_run: bool = False
 
@@ -426,6 +457,8 @@ def load_config(config_path: str = "config.yaml") -> Config:
     risk_cfg = raw_config.get("risk", {})
     trend_cfg = raw_config.get("trend", {})
     rotation_cfg = raw_config.get("rotation", {})
+    mr_cfg = raw_config.get("mean_reversion", {})
+    rs_cfg = raw_config.get("risk_scaling", {})
     
     # Extract min_quantities from position config
     min_quantities = position_cfg.pop("min_quantities", {})
@@ -464,6 +497,11 @@ def load_config(config_path: str = "config.yaml") -> Config:
         risk=RiskConfig(**risk_cfg),
         trend=TrendConfig(**trend_cfg),
         rotation=RotationConfig(**rotation_cfg),
+        mean_reversion=MeanReversionConfig(**mr_cfg),
+        risk_scaling=RiskScalingConfig(
+            enabled=rs_cfg.get("enabled", False),
+            phases=rs_cfg.get("phases", []),
+        ),
         database_path=raw_config.get("database", {}).get("path", "goldast_bot.db"),
         dry_run=raw_config.get("dry_run", False),
     )

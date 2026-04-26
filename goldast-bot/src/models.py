@@ -199,10 +199,12 @@ class SymbolState:
     # Convenience flags
     has_position: bool = False
     _order_pending: bool = False  # True while REST fill confirmation is in-flight
+    _blacklisted: bool = False   # True if symbol is blacklisted (orphan position only)
     
     # Trailing SL state
     trailing_state: str = "initial"  # initial / breakeven / trailing
     trailing_sl_price: float = 0.0
+    entry_atr: float = 0.0             # ATR at entry time (for dynamic trailing comparison)
     partial_tp_done: bool = False
     original_qty: float = 0.0
     

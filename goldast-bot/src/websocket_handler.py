@@ -400,6 +400,10 @@ class WebSocketHandler:
             # --- Candle close detection ---
             if prev_period is not None and current_period > prev_period:
                 # Period rolled over → previous candle is closed
+                logger.info(
+                    f"🕯️ Period rollover {symbol}: prev={prev_period} curr={current_period} "
+                    f"ts={ts} interval_ms={self._interval_ms}"
+                )
                 closed = self._kline_data.get(symbol, {})
                 if closed:
                     closed_msg = KlineMessage(

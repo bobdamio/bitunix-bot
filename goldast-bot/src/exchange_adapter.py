@@ -205,8 +205,62 @@ class ExchangeAdapter:
             logger.error(f"Order failed: {e}")
             return OrderResult(success=False, error=str(e))
 
+    async def place_limit_order(
+        self,
+        symbol: str,
+        direction: TradeDirection,
+        quantity: float,
+        leverage: int,
+        price: float,
+    ) -> OrderResult:
+        """Place a limit order (maker fee) with leverage"""
+        if not await self.set_leverage(symbol, leverage):
+            return OrderResult(success=False, error="Failed to set leverage")
+
+        side = "BUY" if direction == TradeDirection.LONG else "SELL"
+        rounded_price = round_price(symbol, price)
+
+        try:
+            result = await self._api.place_order(
+                symbol=symbol, side=side, order_type="LIMIT",
+                qty=str(quantity), price=str(rounded_price),
+            )
+            order_id = str(result.get("orderId", result))
+            logger.info(f"Limit order placed: {side} {quantity} {symbol} @{rounded_price} (id={order_id})")
+            return OrderResult(success=True, order_id=order_id, data=result)
+        except OrderError as e:
+            logger.warning(f"Limit order rejected: {e}")
+            return OrderResult(success=False, error=str(e))
+        except Exception as e:
+            logger.error(f"Limit order failed: {e}")
+            return OrderResult(success=False, error=str(e))
+
     async def place_order_from_context(self, ctx: OrderContext) -> str:
-        """Place order from OrderContext. Returns order_id or raises."""
+        """Place order: try limit first (maker fee), fallback to market."""
+        # Use aggressive limit price: slightly past current price to ensure fill
+        # BUY: limit at entry_price (or slightly above) — still gets maker fee
+        # SELL: limit at entry_price (or slightly below)
+        if ctx.entry_price and ctx.entry_price > 0:
+            # Aggressive limit: use entry price from signal
+            # Add tiny buffer to ensure fill (0.02% past price)
+            buffer = 0.0002
+            if ctx.direction == TradeDirection.LONG:
+                limit_price = ctx.entry_price * (1 + buffer)
+            else:
+                limit_price = ctx.entry_price * (1 - buffer)
+
+            result = await self.place_limit_order(
+                symbol=ctx.symbol,
+                direction=ctx.direction,
+                quantity=ctx.quantity,
+                leverage=ctx.leverage,
+                price=limit_price,
+            )
+            if result.success:
+                return result.order_id
+            # Limit failed — fallback to market
+            logger.warning(f"Limit order failed for {ctx.symbol}, falling back to market: {result.error}")
+
         result = await self.place_market_order(
             symbol=ctx.symbol,
             direction=ctx.direction,

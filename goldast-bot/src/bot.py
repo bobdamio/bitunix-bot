@@ -268,6 +268,7 @@ class GoldastBot:
             state=self.state,
             symbol_states=self.symbol_states,
             trade_history=self.trade_history,
+            blacklist=getattr(self.config, 'blacklist', []),
         )
 
         # Wire back-reference for loss cooldown tracking
@@ -453,6 +454,11 @@ class GoldastBot:
         if self._periodic_tick % 2 == 0:
             await self.positions.periodic_position_sync()
 
+        # Every ~5min: reconcile trade history with exchange
+        # Catches any trades the real-time WS paths missed
+        if self._periodic_tick % 10 == 0:
+            await self.positions.reconcile_trade_history()
+
         # Every ~60s: check WS health (detect dead symbols, re-subscribe)
         if self._periodic_tick % 2 == 0:
             await self.ws_handler.check_ws_health()
@@ -497,8 +503,8 @@ class GoldastBot:
             except Exception as e:
                 logger.error(f"Pipeline ban check error: {e}")
 
-        # Every ~15min (30 ticks × 30s): opportunity scan
-        # Scans wider market for symbols where price is RIGHT AT an FVG zone
+        # Every ~15min (30 ticks × 30s): FVG opportunity scan
+        # Scans wider market for symbols with price near FVG zones
         # Hot-swaps cold trial symbols for high-proximity opportunities
         # Offset by 15 ticks to not collide with full rotation tick
         if self._periodic_tick % 30 == 15 and self.rotation:

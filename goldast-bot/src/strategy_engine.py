@@ -1,7 +1,7 @@
 """
 GoldasT Bot v2 - Strategy Engine
 EMA crossover trend-following with ATR-based TP/SL.
-Replaces FVG-based signals (46% accuracy) with EMA(9)/EMA(21) crossover.
+Replaces FVG-based signals (46% accuracy) with EMA(9)/EMA(26) crossover.
 """
 
 import asyncio
@@ -106,12 +106,16 @@ class StrategyEngine:
         # === Global Entry Burst Limiter ===
         self._last_global_entry_time: Optional[datetime] = None
         
-        # Dynamic risk sizing (Pine Script: adjust ±10% after each win/loss)
+        # Dynamic risk sizing — asymmetric streak-aware
         self._current_risk_percent: float = config.position.risk_percent  # Start at config default
         self._base_risk_percent: float = config.position.risk_percent
-        self._min_risk_percent: float = max(0.02, config.position.risk_percent * config.position.risk_min_multiplier)
+        self._min_risk_percent: float = max(0.005, config.position.risk_percent * config.position.risk_min_multiplier)
         self._max_risk_percent: float = config.position.risk_percent * config.position.risk_max_multiplier
         self._risk_adjustment_rate: float = config.position.risk_adjustment_rate
+        self._last_phase_log: str = ""  # Track last logged phase to avoid spam
+        self._consecutive_losses: int = 0   # Current loss streak (for accelerated reduction)
+        self._consecutive_wins: int = 0     # Current win streak (for gradual recovery)
+        self._session_peak_balance: float = 0.0  # Track session high for drawdown-aware risk
         
         # Throttling log for entry checks
         self._last_entry_check_log: Dict[str, datetime] = {}
@@ -160,8 +164,8 @@ class StrategyEngine:
 
         # === EMA Crossover Tracking ===
         # Previous candle's EMA values for crossover detection
-        self._prev_ema9: Dict[str, float] = {}
-        self._prev_ema21: Dict[str, float] = {}
+        self._prev_ema5: Dict[str, float] = {}
+        self._prev_ema13: Dict[str, float] = {}
 
     def set_telegram(self, telegram_bot) -> None:
         """Set Telegram bot reference for trade notifications."""
@@ -285,26 +289,100 @@ class StrategyEngine:
 
     # ==================== Higher-TF Trend Filter ====================
 
+    def _update_risk_for_balance(self, balance: float) -> None:
+        """Update base risk percent based on balance phase thresholds.
+        
+        Phased risk scaling: as balance grows past milestones,
+        risk% increases to compound growth faster.
+        Phases are sorted by balance threshold, last match wins.
+        """
+        scaling = self.config.risk_scaling
+        if not scaling.enabled or not scaling.phases:
+            return
+        
+        new_base = self.config.position.risk_percent  # default
+        phase_name = "base"
+        for phase in sorted(scaling.phases, key=lambda p: p.get("balance", 0)):
+            threshold = phase.get("balance", 0)
+            risk = phase.get("risk", new_base)
+            if balance >= threshold:
+                new_base = risk
+                phase_name = f"${threshold:.0f}+"
+        
+        if new_base != self._base_risk_percent:
+            old_base = self._base_risk_percent
+            self._base_risk_percent = new_base
+            self._min_risk_percent = max(0.005, new_base * self.config.position.risk_min_multiplier)
+            self._max_risk_percent = new_base * self.config.position.risk_max_multiplier
+            # Reset current to new base (don't carry over old dynamic adjustments at new phase)
+            self._current_risk_percent = new_base
+            logger.info(
+                f"🚀 RISK PHASE UP: balance ${balance:.2f} → "
+                f"risk {old_base*100:.1f}% → {new_base*100:.1f}% (phase: {phase_name})"
+            )
+        elif phase_name != self._last_phase_log:
+            self._last_phase_log = phase_name
+
     def adjust_risk_after_trade(self, is_win: bool) -> None:
         """Adjust dynamic risk percent after a trade closes.
         
-        Uses additive model: +step on win, -step on loss.
-        Additive is symmetric: win+loss cycle returns to the same value,
-        unlike multiplicative which ratchets down over time.
+        Asymmetric streak-aware model:
+        - Losses reduce risk FASTER (accelerates with streak: ×1, ×1.5, ×2, ×2.5...)
+        - Wins increase risk SLOWER (only ×0.5 step, requires consistent wins to recover)
+        - After drawdown: recovery is gradual, not instant
+        
+        Example at 2% base, 20% rate (step=0.4%):
+          L1: 2.0% → 1.6%  (−0.4%)
+          L2: 1.6% → 1.0%  (−0.6%, ×1.5 acceleration)
+          L3: 1.0% → 0.2%  (−0.8%, ×2.0)  → clamped to floor
+          W1: floor → +0.2% (slow recovery, ×0.5 step)
+          W2: +0.2% more  W3: +0.2% more  ... gradual climb back
         """
+        # Update base risk from balance phase before applying dynamic adjustment
+        if self.state and self.state.balance:
+            self._update_risk_for_balance(self.state.balance)
+            # Track session peak balance for drawdown-aware risk
+            if self.state.balance > self._session_peak_balance:
+                self._session_peak_balance = self.state.balance
+        
         old_risk = self._current_risk_percent
-        step = self._base_risk_percent * self._risk_adjustment_rate  # e.g. 0.01 * 0.10 = 0.001
+        base_step = self._base_risk_percent * self._risk_adjustment_rate
+        
         if is_win:
+            self._consecutive_wins += 1
+            self._consecutive_losses = 0
+            # Slow recovery: half-step per win (need 2 wins to undo 1 loss)
+            win_step = base_step * 0.5
             self._current_risk_percent = min(
-                self._current_risk_percent + step, self._max_risk_percent
+                self._current_risk_percent + win_step, self._max_risk_percent
             )
+            streak_info = f"W{self._consecutive_wins}"
         else:
+            self._consecutive_losses += 1
+            self._consecutive_wins = 0
+            # Accelerated reduction: step × (1 + 0.5 × streak_index)
+            # L1=×1.0, L2=×1.5, L3=×2.0, L4=×2.5 ...
+            loss_mult = 1.0 + 0.5 * (self._consecutive_losses - 1)
+            loss_step = base_step * loss_mult
             self._current_risk_percent = max(
-                self._current_risk_percent - step, self._min_risk_percent
+                self._current_risk_percent - loss_step, self._min_risk_percent
             )
+            streak_info = f"L{self._consecutive_losses} (×{loss_mult:.1f})"
+        
+        # Drawdown guard: if balance dropped >5% from session peak, cap risk at base
+        if (self.state and self.state.balance and self._session_peak_balance > 0):
+            dd = (self._session_peak_balance - self.state.balance) / self._session_peak_balance
+            if dd > 0.05:
+                cap = self._base_risk_percent * 0.75  # 75% of base during drawdown
+                if self._current_risk_percent > cap:
+                    self._current_risk_percent = cap
+                    streak_info += f" DD={dd*100:.1f}%→capped"
+        
         logger.info(
-            f"📊 Dynamic risk: {'WIN' if is_win else 'LOSS'} → "
-            f"risk {old_risk*100:.2f}% → {self._current_risk_percent*100:.2f}%"
+            f"📊 Dynamic risk: {'WIN' if is_win else 'LOSS'} [{streak_info}] → "
+            f"risk {old_risk*100:.2f}% → {self._current_risk_percent*100:.2f}% "
+            f"(base={self._base_risk_percent*100:.1f}% floor={self._min_risk_percent*100:.2f}% "
+            f"cap={self._max_risk_percent*100:.1f}%)"
         )
 
     def record_direction_trade(self, direction: str, pnl: float) -> None:
@@ -649,6 +727,20 @@ class StrategyEngine:
         return 100 - (100 / (1 + money_ratio))
 
     @staticmethod
+    def _calc_bollinger_bands(closes: list, period: int = 20, std_mult: float = 2.5):
+        """Calculate Bollinger Bands.
+        
+        Returns: (middle, upper, lower) or (None, None, None) if insufficient data.
+        """
+        if len(closes) < period:
+            return None, None, None
+        window = closes[-period:]
+        sma = sum(window) / period
+        variance = sum((c - sma) ** 2 for c in window) / period
+        std = variance ** 0.5
+        return sma, sma + std_mult * std, sma - std_mult * std
+
+    @staticmethod
     def _compute_trend(closes: list) -> str:
         """Compute trend from closing prices using EMA8/EMA21 (legacy label)."""
         if len(closes) < 21:
@@ -910,15 +1002,41 @@ class StrategyEngine:
             # Update market structure (BOS detection) on candle close
             self._update_market_structure(symbol)
 
-            # === EMA Crossover Signal (replaces FVG detection) ===
-            # FVG signals had 46% direction accuracy over 500 trades = noise.
-            # EMA crossover follows actual trend direction = higher accuracy.
-            asyncio.create_task(self._check_ema_signal_on_close(symbol))
-        else:
-            # On live tick: manage trailing SL for open positions
-            # (No more FVG zone entry checking — EMA entries happen on candle close)
+            # === FVG Detection + Candle Close Entry ===
+            # Detect FVG first, then check entry at candle close price
+            # NO intra-candle entries — only trade on confirmed closes
+            asyncio.create_task(self._detect_and_enter_on_close(symbol, candle.close))
+
+            # === Mean Reversion Signal (ranging market) ===
+            asyncio.create_task(self._check_mean_reversion_on_close(symbol))
+
+            # === Candle-Close Exit: check logical SL/TP/trailing on close ===
             if state and state.has_position and state.current_order:
                 asyncio.create_task(self._check_trailing_on_tick(symbol, state))
+        else:
+            # On live tick: NO position management (all exits on candle close)
+            # Exchange hard-SL (set wider) protects against flash crashes only
+            pass
+
+    # ==================== Candle Close Entry ====================
+
+    async def _detect_and_enter_on_close(self, symbol: str, close_price: float) -> None:
+        """Detect FVG and check entry — all on candle close only.
+        
+        No intra-candle entries. This ensures we only act on confirmed
+        price levels, avoiding wicks and noise.
+        """
+        # Skip new entries for blacklisted symbols (orphan positions only)
+        state = self.symbol_states.get(symbol)
+        if state and getattr(state, '_blacklisted', False):
+            return
+
+        # 1. Detect / update FVG zones
+        await self._detect_fvg_on_close(symbol)
+
+        # 2. Check if candle close price triggers entry into active FVG
+        if state and state.active_fvg and not state.has_position:
+            await self._check_live_entry(symbol, close_price)
 
     # ==================== FVG Detection ====================
 
@@ -1016,17 +1134,17 @@ class StrategyEngine:
     # ==================== EMA Crossover Signal ====================
 
     async def _check_ema_signal_on_close(self, symbol: str) -> None:
-        """Detect EMA(9)/EMA(21) crossover on candle close and trigger entry.
+        """Detect EMA(5)/EMA(13) crossover on candle close and trigger entry.
         
-        Replaces FVG-based signal generation. EMA crossover is a proven
-        trend-following approach with >50% directional accuracy on crypto.
-        FVG signals had only 46% accuracy over 500 trades.
+        EMA 5/13 outperforms 9/26 on 3-day backtest (47 symbols):
+        5/13: WR=40.5%, +$73/day vs 9/26: WR=43%, +$49/day.
+        Faster EMA(5/13) catches more moves with ADX≥20 filter.
         
-        Signal: EMA(9) crosses EMA(21) → enter in crossover direction.
-        TP/SL: purely ATR-based (1.5 ATR stop, 3R target).
+        Signal: EMA(5) crosses EMA(13) → enter in crossover direction.
+        TP/SL: purely ATR-based (1.5 ATR stop, 2.5R target).
         """
         candles = self.ws_handler.get_candle_buffer(symbol)
-        if not candles or len(candles) < 25:
+        if not candles or len(candles) < 20:
             return
 
         state = self.symbol_states.get(symbol)
@@ -1046,26 +1164,26 @@ class StrategyEngine:
         current_price = closes[-1]
 
         # Compute current EMAs
-        ema9 = self._ema(closes, 9)
-        ema21 = self._ema(closes, 21)
+        ema5 = self._ema(closes, 5)
+        ema13 = self._ema(closes, 13)
         ema50 = self._ema(closes, 50) if len(closes) >= 50 else None
 
         # Get previous EMAs
-        prev_ema9 = self._prev_ema9.get(symbol)
-        prev_ema21 = self._prev_ema21.get(symbol)
+        prev_ema5 = self._prev_ema5.get(symbol)
+        prev_ema13 = self._prev_ema13.get(symbol)
 
         # Store for next candle
-        self._prev_ema9[symbol] = ema9
-        self._prev_ema21[symbol] = ema21
+        self._prev_ema5[symbol] = ema5
+        self._prev_ema13[symbol] = ema13
 
-        if prev_ema9 is None or prev_ema21 is None:
+        if prev_ema5 is None or prev_ema13 is None:
             return  # First candle — need at least 2 to detect cross
 
         # Detect crossover
         direction = None
-        if prev_ema9 <= prev_ema21 and ema9 > ema21:
+        if prev_ema5 <= prev_ema13 and ema5 > ema13:
             direction = TradeDirection.LONG   # Bullish crossover
-        elif prev_ema9 >= prev_ema21 and ema9 < ema21:
+        elif prev_ema5 >= prev_ema13 and ema5 < ema13:
             direction = TradeDirection.SHORT  # Bearish crossover
 
         if direction is None:
@@ -1076,7 +1194,7 @@ class StrategyEngine:
 
         # === ADX chop filter: skip entry in ranging/choppy market ===
         adx = self._calc_adx(candles)
-        adx_min = 20  # ADX < 20 = choppy market, EMA crosses are noise
+        adx_min = 20  # ADX < 20 = choppy (3d backtest: ADX≥20 = $1.19/trade vs ADX≥15 = $0.98/trade)
         if adx < adx_min:
             logger.info(
                 f"🚫 EMA cross {symbol} {dir_str} blocked — ADX={adx:.1f} < {adx_min} (choppy market)"
@@ -1087,12 +1205,12 @@ class StrategyEngine:
         # Simple 1h direction check: 1h close > prev 1h close = bullish.
         # This replaces complex score_1h thresholds — simpler, allows more trades.
         score_1h = self._score_1h.get(symbol, 0.0)
-        if direction == TradeDirection.LONG and score_1h < -0.1:
+        if direction == TradeDirection.LONG and score_1h < -0.3:
             logger.info(
                 f"🚫 EMA cross {symbol} LONG blocked — 1h trend={score_1h:+.2f} (bearish)"
             )
             return
-        if direction == TradeDirection.SHORT and score_1h > 0.1:
+        if direction == TradeDirection.SHORT and score_1h > 0.3:
             logger.info(
                 f"🚫 EMA cross {symbol} SHORT blocked — 1h trend={score_1h:+.2f} (bullish)"
             )
@@ -1243,7 +1361,7 @@ class StrategyEngine:
 
         logger.info(
             f"📊 EMA CROSS: {symbol} {dir_str} | "
-            f"EMA9={ema9:.6f} EMA21={ema21:.6f} EMA50={f'{ema50:.6f}' if ema50 else 'N/A'} | "
+            f"EMA5={ema5:.6f} EMA13={ema13:.6f} EMA50={f'{ema50:.6f}' if ema50 else 'N/A'} | "
             f"price={current_price:.6f} RSI={f'{rsi:.1f}' if rsi else 'N/A'} "
             f"MFI={f'{mfi:.1f}' if mfi else 'N/A'} "
             f"ADX={adx:.1f} [{trend_info}]"
@@ -1256,6 +1374,142 @@ class StrategyEngine:
         self._last_global_entry_time = datetime.now()
 
         # Track entry for per-symbol limit
+        if symbol not in self._symbol_entry_times:
+            self._symbol_entry_times[symbol] = []
+        self._symbol_entry_times[symbol].append(datetime.now())
+
+        await self._execute_entry(symbol, fvg, current_price, 1.0)
+
+    async def _check_mean_reversion_on_close(self, symbol: str) -> None:
+        """Mean reversion signal: Bollinger Band touch + RSI extreme in ranging market.
+        
+        Only triggers when ADX < threshold (market is ranging).
+        LONG: price at/below lower BB + RSI oversold
+        SHORT: price at/above upper BB + RSI overbought
+        Walk-forward validated: test=$+33.60 on 30% hold-out data.
+        """
+        mr_cfg = self.config.mean_reversion
+        if not mr_cfg.enabled:
+            return
+
+        candles = self.ws_handler.get_candle_buffer(symbol)
+        if not candles or len(candles) < mr_cfg.bb_period + 5:
+            return
+
+        state = self.symbol_states.get(symbol)
+        if not state:
+            return
+        if state.has_position:
+            return
+        if getattr(state, '_blacklisted', False):
+            return
+
+        # === Session/killzone filter ===
+        if self.config.session.enabled:
+            is_active, zone_name = self.config.session.is_killzone_now()
+            if not is_active:
+                return
+
+        machine = self.order_manager.get_machine(symbol)
+        if machine and machine.ctx.state not in (OrderState.IDLE,):
+            return
+
+        closes = [c.close for c in candles]
+        current_price = closes[-1]
+
+        # Only in ranging market (ADX < threshold)
+        adx = self._calc_adx(candles)
+        if adx >= mr_cfg.adx_max:
+            return  # Trending — let FVG strategy handle it
+
+        # Bollinger Bands
+        mid, upper, lower = self._calc_bollinger_bands(
+            closes, mr_cfg.bb_period, mr_cfg.bb_std
+        )
+        if mid is None:
+            return
+
+        # RSI
+        rsi = self._rsi_cache.get(symbol)
+        if rsi is None:
+            rsi = self._rsi(closes[-30:], 14) if len(closes) >= 15 else None
+        if rsi is None:
+            return
+
+        # Signal detection
+        direction = None
+        if current_price <= lower and rsi <= mr_cfg.rsi_entry:
+            direction = TradeDirection.LONG
+        elif current_price >= upper and rsi >= (100 - mr_cfg.rsi_entry):
+            direction = TradeDirection.SHORT
+        
+        if direction is None:
+            return
+
+        dir_str = direction.value
+
+        # === Reuse same cooldown/position limit checks as EMA ===
+        max_daily_loss = self.state.balance * self.config.risk.max_daily_loss_percent / 100
+        if self.state.daily_pnl < 0 and abs(self.state.daily_pnl) >= max_daily_loss:
+            return
+        if self._global_loss_pause_until and datetime.now() < self._global_loss_pause_until:
+            return
+        entry_cooldown = self.config.cooldowns.entry_cooldown_seconds
+        if state.last_entry_time and entry_cooldown > 0:
+            if (datetime.now() - state.last_entry_time).total_seconds() < entry_cooldown:
+                return
+        loss_cooldown = self.config.cooldowns.loss_cooldown_seconds
+        last_loss = self._last_loss_time.get(symbol)
+        if last_loss and loss_cooldown > 0:
+            if (datetime.now() - last_loss).total_seconds() < loss_cooldown:
+                return
+        global_cd = self.config.cooldowns.global_entry_cooldown_seconds
+        if global_cd > 0 and self._last_global_entry_time:
+            if (datetime.now() - self._last_global_entry_time).total_seconds() < global_cd:
+                return
+        max_positions = self.config.multi_symbol.max_concurrent_positions
+        total_positions = sum(1 for s, st in self.symbol_states.items() if st.has_position)
+        if total_positions >= max_positions:
+            return
+        ban_until = self._symbol_loss_ban_until.get(symbol)
+        if ban_until and datetime.now() < ban_until:
+            return
+        max_same = self.config.multi_symbol.max_same_direction
+        same_dir_count = sum(
+            1 for s, st in self.symbol_states.items()
+            if st.has_position and st.current_order
+            and st.current_order.get('direction') == direction
+        )
+        if same_dir_count >= max_same:
+            return
+
+        # Create virtual FVG for entry pipeline
+        fvg = FVG(
+            symbol=symbol,
+            direction=direction,
+            top=current_price + current_price * 0.001,
+            bottom=current_price - current_price * 0.001,
+            created_at=datetime.now(),
+            candle_index=len(candles) - 1,
+            fvg_type=FVGType.BULLISH if direction == TradeDirection.LONG else FVGType.BEARISH,
+            gap_percent=0.0,
+            signal_source="mean_reversion",
+        )
+        fvg.strength = 0.5
+        fvg.entry_triggered = True
+        state.active_fvg = fvg
+
+        logger.info(
+            f"🔄 MEAN REVERSION: {symbol} {dir_str} | "
+            f"price={current_price:.6f} BB_lower={lower:.6f} BB_upper={upper:.6f} BB_mid={mid:.6f} | "
+            f"RSI={rsi:.1f} ADX={adx:.1f} (ranging)"
+        )
+
+        state.has_position = True
+        state.current_order = {"direction": direction, "_reserved": True}
+        state.last_entry_time = datetime.now()
+        self._last_global_entry_time = datetime.now()
+
         if symbol not in self._symbol_entry_times:
             self._symbol_entry_times[symbol] = []
         self._symbol_entry_times[symbol].append(datetime.now())
@@ -1558,6 +1812,25 @@ class StrategyEngine:
 
             long_threshold = trend_cfg.long_entry_threshold
 
+            # === Adaptive Regime: lower thresholds in ranging market ===
+            # ADX < 20 = ranging → strict trend thresholds block everything
+            # Solution: multiply thresholds by ranging_trend_multiplier (0.60)
+            adaptive_enabled = getattr(trend_cfg, 'adaptive_regime_enabled', False)
+            is_ranging_regime = False
+            if adaptive_enabled:
+                candles_for_adx = self.ws_handler.get_candle_buffer(symbol)
+                if candles_for_adx and len(candles_for_adx) >= 20:
+                    adx_value = self._calc_adx(candles_for_adx)
+                    ranging_adx = getattr(trend_cfg, 'ranging_adx_threshold', 20)
+                    if adx_value < ranging_adx:
+                        is_ranging_regime = True
+                        ranging_mult = getattr(trend_cfg, 'ranging_trend_multiplier', 0.60)
+                        old_long = long_threshold
+                        old_short = threshold
+                        long_threshold *= ranging_mult
+                        threshold *= ranging_mult
+                        trend_info += f" [📊ADX={adx_value:.1f}<{ranging_adx}→RANGING thresholds×{ranging_mult}]"
+
             # Apply adaptive direction penalty if direction is losing
             dir_str = fvg.direction.value  # "LONG" or "SHORT"
             is_nerfed, penalty_mult = self._is_direction_nerfed(dir_str)
@@ -1672,7 +1945,11 @@ class StrategyEngine:
                 return
 
             # === Confluence sizing multiplier (soft BOS/HTF mode) ===
+            # FIX: Use worst-single-penalty instead of multiplicative stacking
+            # Old: BOS(×0.5) × HTF(×0.5) × Trial(×0.5) = ×0.125 → blocked
+            # New: min(0.5, 0.5, 0.5) = ×0.5 → tradeable at half size
             confluence_mult = 1.0
+            _soft_penalties = []  # Track individual penalties, take worst one
             bos_passed = True
             htf_passed = True
 
@@ -1710,7 +1987,7 @@ class StrategyEngine:
                                     self._last_entry_check_log[f"{symbol}_bos_unstable"] = now
                                 if not trend_cfg.bos_soft_mode:
                                     return
-                                confluence_mult *= trend_cfg.soft_mode_size_mult
+                                _soft_penalties.append(trend_cfg.soft_mode_size_mult)
                             else:
                                 from src.market_structure import TrendDirection
                                 bos_dir = ms.last_bos_direction
@@ -1733,7 +2010,7 @@ class StrategyEngine:
                             bos_passed = False
                             if trend_cfg.bos_soft_mode:
                                 # Soft: use FVG direction but half size
-                                confluence_mult *= trend_cfg.soft_mode_size_mult
+                                _soft_penalties.append(trend_cfg.soft_mode_size_mult)
                                 now = datetime.now()
                                 last_log = self._last_entry_check_log.get(f"{symbol}_bos")
                                 if not last_log or (now - last_log).total_seconds() > 120:
@@ -1775,7 +2052,7 @@ class StrategyEngine:
 
                             bos_passed = False
                             if trend_cfg.bos_soft_mode:
-                                confluence_mult *= trend_cfg.soft_mode_size_mult
+                                _soft_penalties.append(trend_cfg.soft_mode_size_mult)
                                 now = datetime.now()
                                 last_log = self._last_entry_check_log.get(f"{symbol}_bos")
                                 if not last_log or (now - last_log).total_seconds() > 120:
@@ -1839,7 +2116,7 @@ class StrategyEngine:
                     htf_passed = False
                     if trend_cfg.htf_soft_mode:
                         # Soft mode: reduce position size instead of blocking
-                        confluence_mult *= trend_cfg.soft_mode_size_mult
+                        _soft_penalties.append(trend_cfg.soft_mode_size_mult)
                         now = datetime.now()
                         last_log = self._last_entry_check_log.get(f"{symbol}_htf")
                         if not last_log or (now - last_log).total_seconds() > 120:
@@ -1876,11 +2153,11 @@ class StrategyEngine:
                 rotation_cfg = self.config.rotation
                 # Baseline trial size reduction — unproven symbols always trade smaller
                 trial_mult = getattr(rotation_cfg, 'trial_size_multiplier', 0.5)
-                confluence_mult *= trial_mult
+                _soft_penalties.append(trial_mult)
                 # Extra penalty if BOS/HTF missing (on top of baseline)
                 if getattr(rotation_cfg, 'trial_require_confluence', True):
                     if not bos_passed or not htf_passed:
-                        confluence_mult *= 0.30  # additional ×0.30 → total ×0.15
+                        _soft_penalties.append(0.30)  # additional penalty for missing confluence
                         now = datetime.now()
                         last_log = self._last_entry_check_log.get(f"{symbol}_trial")
                         if not last_log or (now - last_log).total_seconds() > 120:
@@ -2011,10 +2288,14 @@ class StrategyEngine:
                             self._last_entry_check_log[f"{symbol}_exh"] = now
                         return
 
-            # === CONFLUENCE FLOOR: block trades with stacked soft-mode penalties ===
-            # When BOS(×0.5) + HTF(×0.5) + Trial(×0.5) stack → ×0.125 = micro-position
-            # that pays the same fee but wins ~$0.12. Block instead of entering tiny.
-            min_confluence = 0.30
+            # === APPLY SOFT PENALTIES: worst-single instead of multiplicative ===
+            # Old: ×0.5 × ×0.5 × ×0.5 = ×0.125 → always blocked by floor
+            # New: take the worst single penalty → ×0.5 → tradeable at half size
+            if _soft_penalties:
+                confluence_mult *= min(_soft_penalties)  # worst single penalty
+
+            # === CONFLUENCE FLOOR: block trades with too-small position ===
+            min_confluence = 0.25  # Lowered from 0.30 — worst penalty ×0.5 now passes
             if confluence_mult < min_confluence:
                 now = datetime.now()
                 last_log = self._last_entry_check_log.get(f"{symbol}_conffloor")
@@ -2135,8 +2416,8 @@ class StrategyEngine:
                 from .tpsl_calculator import TPSLLevels
                 atr = TPSLCalculator.calculate_atr(candles, period=self.config.tpsl.atr_period)
                 atr = max(atr, entry_price * self.config.tpsl.atr_floor_pct)
-                sl_distance = atr * 1.5  # 1.5 ATR stop
-                tp_distance = sl_distance * self.config.tpsl.force_close_at_r  # 3R target
+                sl_distance = atr * 2.0  # 2.0 ATR stop (walk-forward validated)
+                tp_distance = sl_distance * self.config.tpsl.force_close_at_r  # 2R target
 
                 if fvg.direction == TradeDirection.LONG:
                     sl_price = entry_price - sl_distance
@@ -2158,9 +2439,40 @@ class StrategyEngine:
                 )
                 logger.info(
                     f"📊 EMA TP/SL [{symbol} {fvg.direction.value}]: "
-                    f"SL={fmt_price(sl_price)} ({sl_distance/entry_price*100:.3f}%, 1.5×ATR) "
+                    f"SL={fmt_price(sl_price)} ({sl_distance/entry_price*100:.3f}%, 2.0×ATR) "
                     f"TP={fmt_price(tp_price)} ({tp_distance/entry_price*100:.3f}%, {self.config.tpsl.force_close_at_r}R) "
                     f"ATR={fmt_price(atr)}"
+                )
+            elif fvg.signal_source == "mean_reversion":
+                # === Mean Reversion: fixed % SL/TP ===
+                from .tpsl_calculator import TPSLLevels
+                mr = self.config.mean_reversion
+                sl_distance = entry_price * mr.sl_pct
+                tp_distance = entry_price * mr.tp_pct
+
+                if fvg.direction == TradeDirection.LONG:
+                    sl_price = entry_price - sl_distance
+                    tp_price = entry_price + tp_distance
+                else:
+                    sl_price = entry_price + sl_distance
+                    tp_price = entry_price - tp_distance
+
+                sl_price = max(sl_price, 0.0001)
+                tp_price = max(tp_price, 0.0001)
+
+                atr = TPSLCalculator.calculate_atr(candles, period=self.config.tpsl.atr_period)
+                tpsl = TPSLLevels(
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    risk_amount=sl_distance,
+                    reward_amount=tp_distance,
+                    atr=atr,
+                    method="mean_reversion",
+                )
+                logger.info(
+                    f"🔄 MR TP/SL [{symbol} {fvg.direction.value}]: "
+                    f"SL={fmt_price(sl_price)} ({mr.sl_pct*100:.1f}%) "
+                    f"TP={fmt_price(tp_price)} ({mr.tp_pct*100:.1f}%)"
                 )
             else:
                 # === FVG signal: zone-based TP/SL (legacy) ===
@@ -2220,17 +2532,27 @@ class StrategyEngine:
                 risk_override=effective_risk,
             )
 
-            # --- Step 1: Place market order ---
+            # --- Step 1: Place limit order (maker fee), fallback to market ---
             logger.info(
-                f"📤 Placing market order: {symbol} {fvg.direction.value} "
-                f"qty={position_size.quantity:.6f} leverage={leverage}x"
+                f"📤 Placing order: {symbol} {fvg.direction.value} "
+                f"qty={position_size.quantity:.6f} leverage={leverage}x entry={entry_price:.4f}"
             )
-            order_result = await self.exchange.place_market_order(
+            order_result = await self.exchange.place_limit_order(
                 symbol=symbol,
                 direction=fvg.direction,
                 quantity=position_size.quantity,
                 leverage=leverage,
+                price=entry_price,
             )
+            if not order_result.success:
+                # Limit failed — fallback to market
+                logger.warning(f"Limit order failed for {symbol}: {order_result.error}, falling back to market")
+                order_result = await self.exchange.place_market_order(
+                    symbol=symbol,
+                    direction=fvg.direction,
+                    quantity=position_size.quantity,
+                    leverage=leverage,
+                )
             if not order_result.success:
                 logger.error(f"Order failed for {symbol}: {order_result.error}")
                 # Auto-blacklist symbols rejected with [20012] (not tradeable)
@@ -2245,7 +2567,7 @@ class StrategyEngine:
                 return
 
             order_id = order_result.order_id
-            logger.info(f"✅ Market order placed: {symbol} id={order_id}")
+            logger.info(f"✅ Order placed: {symbol} id={order_id}")
 
             # has_position already set True by caller (slot reservation).
             # Set _order_pending to guard against false WS close events
@@ -2277,7 +2599,13 @@ class StrategyEngine:
                 # BUG FIX: clear _order_pending so symbol isn't stuck
                 if state:
                     state._order_pending = False
-                    state.has_position = False
+                    # Don't clear has_position here — the order may have
+                    # filled on exchange even though REST didn't return it
+                    # yet.  Position manager sync will detect & manage it.
+                    logger.warning(
+                        f"Keeping has_position=True for {symbol} — "
+                        f"position_manager sync will reconcile"
+                    )
                 return
 
             # --- Step 3: Set TP/SL ---
@@ -2288,7 +2616,7 @@ class StrategyEngine:
                 from .tpsl_calculator import TPSLLevels
                 atr = TPSLCalculator.calculate_atr(candles, period=self.config.tpsl.atr_period)
                 atr = max(atr, avg_open_price * self.config.tpsl.atr_floor_pct)
-                sl_distance = atr * 1.5
+                sl_distance = atr * 2.0  # 2.0 ATR stop (walk-forward validated)
                 tp_distance = sl_distance * self.config.tpsl.force_close_at_r
 
                 if fvg.direction == TradeDirection.LONG:
@@ -2309,6 +2637,32 @@ class StrategyEngine:
                     atr=atr,
                     method="ema_atr",
                 )
+            elif fvg.signal_source == "mean_reversion":
+                # === MR signal: recalculate with actual fill price ===
+                from .tpsl_calculator import TPSLLevels
+                mr = self.config.mean_reversion
+                sl_distance = avg_open_price * mr.sl_pct
+                tp_distance = avg_open_price * mr.tp_pct
+
+                if fvg.direction == TradeDirection.LONG:
+                    sl_price = avg_open_price - sl_distance
+                    tp_price = avg_open_price + tp_distance
+                else:
+                    sl_price = avg_open_price + sl_distance
+                    tp_price = avg_open_price - tp_distance
+
+                sl_price = max(sl_price, 0.0001)
+                tp_price = max(tp_price, 0.0001)
+
+                atr = TPSLCalculator.calculate_atr(candles, period=self.config.tpsl.atr_period)
+                tpsl = TPSLLevels(
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    risk_amount=sl_distance,
+                    reward_amount=tp_distance,
+                    atr=atr,
+                    method="mean_reversion",
+                )
             else:
                 tpsl = self.tpsl_calculator.calculate(
                     entry_price=avg_open_price,
@@ -2318,18 +2672,32 @@ class StrategyEngine:
                     notional_usd=actual_notional,
                 )
 
+            # === Candle-Close Exit Strategy ===
+            # Logical SL/TP: checked on candle close only (avoids wick-based false stops)
+            # Hard SL on exchange: 2× wider (emergency protection for flash crashes only)
+            # Data shows 90% of quick SLs (<15min) were false — candle closed profitably
+            logical_sl = tpsl.sl_price
+            sl_distance = abs(avg_open_price - logical_sl)
+            if fvg.direction == TradeDirection.LONG:
+                hard_sl = avg_open_price - sl_distance * 2.0
+            else:
+                hard_sl = avg_open_price + sl_distance * 2.0
+            hard_sl = max(hard_sl, 0.0001)
+
             for attempt in range(3):
                 try:
                     success = await self.exchange.set_position_tpsl(
                         symbol=symbol,
                         position_id=position_id,
                         tp_price=tpsl.tp_price,
-                        sl_price=tpsl.sl_price,
+                        sl_price=hard_sl,
                     )
                     if success:
                         logger.info(
                             f"✅ TP/SL set for {symbol}: "
-                            f"TP={fmt_price(tpsl.tp_price)}, SL={fmt_price(tpsl.sl_price)} "
+                            f"TP={fmt_price(tpsl.tp_price)}, "
+                            f"LogicalSL={fmt_price(logical_sl)}, "
+                            f"HardSL={fmt_price(hard_sl)} (2× emergency) "
                             f"(R:R={tpsl.risk_reward_ratio:.2f}:1)"
                         )
                         break
@@ -2358,6 +2726,7 @@ class StrategyEngine:
                     "tp_price": tpsl.tp_price,
                     "sl_price": tpsl.sl_price,
                     "original_risk": abs(avg_open_price - tpsl.sl_price),  # Fixed 1R for all calculations
+                    "entry_atr": getattr(tpsl, 'atr', 0) or 0,  # ATR at entry for dynamic trailing
                     "quantity": position_size.quantity,
                     "leverage": leverage,
                     "direction": fvg.direction,
@@ -2372,12 +2741,14 @@ class StrategyEngine:
                 state.trailing_sl_price = tpsl.sl_price
                 state.partial_tp_done = False
                 state.original_qty = position_size.quantity
+                state.entry_atr = getattr(tpsl, 'atr', 0) or 0
 
             # Persist original_risk for restart recovery
             if position_id and self._position_manager:
                 self._position_manager.save_open_position(str(position_id), {
                     "symbol": symbol,
                     "original_risk": abs(avg_open_price - tpsl.sl_price),
+                    "entry_atr": getattr(tpsl, 'atr', 0) or 0,
                     "entry_price": avg_open_price,
                     "tp_price": tpsl.tp_price,
                     "sl_price": tpsl.sl_price,
@@ -2466,6 +2837,30 @@ class StrategyEngine:
     #
     # Phase transitions clamp SL to never lose locked profit.
 
+    def _get_trailing_atr(self, symbol: str, entry_atr: float) -> float:
+        """Get current ATR for trailing, clamped to ±clamp% of entry ATR.
+
+        Returns clamped ATR if dynamic trailing is enabled and data is available,
+        otherwise returns 0 (caller falls back to original_risk).
+        """
+        tpsl_cfg = self.config.tpsl
+        if not tpsl_cfg.trailing_dynamic_atr or entry_atr <= 0:
+            return 0.0
+
+        candles = self.ws_handler.get_candle_buffer(symbol)
+        if not candles or len(candles) < tpsl_cfg.atr_period:
+            return 0.0
+
+        current_atr = TPSLCalculator.calculate_atr(candles, period=tpsl_cfg.atr_period)
+        if current_atr <= 0:
+            return 0.0
+
+        # Clamp: prevent ATR spikes/drops from destabilizing trailing
+        clamp = tpsl_cfg.trailing_atr_clamp
+        lo = entry_atr * (1.0 - clamp)
+        hi = entry_atr * (1.0 + clamp)
+        return max(lo, min(current_atr, hi))
+
     def _get_runner_sl_distance(self, profit_r: float) -> float:
         """Get dynamic runner SL distance — two-stage tightening.
 
@@ -2521,6 +2916,11 @@ class StrategyEngine:
             if risk <= 0:
                 return
 
+            # Dynamic ATR: use clamped current ATR for distance calculations
+            entry_atr = order.get("entry_atr", 0) or state.entry_atr
+            trail_atr = self._get_trailing_atr(symbol, entry_atr)
+            trail_unit = trail_atr if trail_atr > 0 else risk  # ATR-based or R-based distances
+
             if direction == TradeDirection.LONG:
                 profit_r = (current_price - entry_price) / risk
             else:
@@ -2567,12 +2967,12 @@ class StrategyEngine:
                 step_r = tpsl_cfg.trailing_step_r
                 current_trail = state.trailing_sl_price or sl_price
                 if direction == TradeDirection.LONG:
-                    candidate_sl = entry_price + (risk * candidate_lock_r)
-                    if candidate_sl > current_trail + (risk * step_r):
+                    candidate_sl = entry_price + (trail_unit * candidate_lock_r)
+                    if candidate_sl > current_trail + (trail_unit * step_r):
                         needs_action = True
                 else:
-                    candidate_sl = entry_price - (risk * candidate_lock_r)
-                    if candidate_sl < current_trail - (risk * step_r):
+                    candidate_sl = entry_price - (trail_unit * candidate_lock_r)
+                    if candidate_sl < current_trail - (trail_unit * step_r):
                         needs_action = True
 
             # Runner: continuous SL+TP sliding (tightens past 50% TP)
@@ -2581,12 +2981,12 @@ class StrategyEngine:
                 step_r = tpsl_cfg.trailing_step_r
                 current_trail = state.trailing_sl_price or sl_price
                 if direction == TradeDirection.LONG:
-                    candidate_sl = current_price - (risk * sl_dist_r)
-                    if candidate_sl > current_trail + (risk * step_r):
+                    candidate_sl = current_price - (trail_unit * sl_dist_r)
+                    if candidate_sl > current_trail + (trail_unit * step_r):
                         needs_action = True
                 else:
-                    candidate_sl = current_price + (risk * sl_dist_r)
-                    if candidate_sl < current_trail - (risk * step_r):
+                    candidate_sl = current_price + (trail_unit * sl_dist_r)
+                    if candidate_sl < current_trail - (trail_unit * step_r):
                         needs_action = True
 
             if needs_action:
@@ -2634,7 +3034,7 @@ class StrategyEngine:
             return
 
         entry_price = order.get("entry_price", 0)
-        sl_price = order.get("sl_price", 0)
+        sl_price = order.get("sl_price", 0)  # Logical SL (zone-based, tight)
         tp_price = order.get("tp_price", 0)
         direction = order.get("direction")
         position_id = order.get("position_id")
@@ -2649,6 +3049,82 @@ class StrategyEngine:
         risk = order.get("original_risk", 0) or abs(entry_price - sl_price)
         if risk <= 0:
             return
+
+        # Dynamic ATR: use clamped current ATR for distance calculations
+        entry_atr = order.get("entry_atr", 0) or state.entry_atr
+        trail_atr = self._get_trailing_atr(symbol, entry_atr)
+        trail_unit = trail_atr if trail_atr > 0 else risk  # ATR-based or R-based distances
+        atr_ratio = trail_atr / entry_atr if (trail_atr > 0 and entry_atr > 0) else 0.0
+
+        # === Candle-Close Logical SL Check ===
+        # Exchange has hard SL at 2× distance (emergency only).
+        # The real SL is checked HERE on candle close — avoids wick-based false stops.
+        # Use trailing_sl_price if it's been moved (e.g. by BE), otherwise original sl_price.
+        #
+        # MIN HOLD GUARD: Skip logical SL for first 2 candles (30min on 15m TF).
+        # 80% of losses close <15min = noise, not real reversals.
+        # Hard SL on exchange still protects against flash crashes.
+        entry_time = state.last_entry_time
+        if entry_time:
+            hold_seconds = (datetime.now() - entry_time).total_seconds()
+            if hold_seconds < 1800:  # 30 minutes = 2 × 15m candles
+                logger.debug(
+                    f"⏳ {symbol}: hold={hold_seconds:.0f}s < 1800s min — "
+                    f"skipping logical SL check (hard SL on exchange protects)"
+                )
+                # Still allow trailing BE/runner to activate, just skip force-close SL
+                pass
+            else:
+                effective_sl = state.trailing_sl_price or sl_price
+                sl_breached = False
+                if direction == TradeDirection.LONG and current_price <= effective_sl:
+                    sl_breached = True
+                elif direction == TradeDirection.SHORT and current_price >= effective_sl:
+                    sl_breached = True
+
+                if sl_breached:
+                    logger.info(
+                        f"🛑 Candle-close SL: {symbol} {direction.value} — "
+                        f"close={fmt_price(current_price)} breached SL={fmt_price(effective_sl)} "
+                        f"| Closing via market order"
+                    )
+                    try:
+                        closed = await self.exchange.force_close_symbol(symbol)
+                        if closed:
+                            state.has_position = False
+                            state._order_pending = False
+                            state.current_order = None
+                            state.trailing_state = "initial"
+                            return
+                    except Exception as e:
+                        logger.error(f"Candle-close SL force-close failed: {e}")
+                    return
+        else:
+            # No entry time recorded — fall back to normal SL check
+            effective_sl = state.trailing_sl_price or sl_price
+            sl_breached = False
+            if direction == TradeDirection.LONG and current_price <= effective_sl:
+                sl_breached = True
+            elif direction == TradeDirection.SHORT and current_price >= effective_sl:
+                sl_breached = True
+
+            if sl_breached:
+                logger.info(
+                    f"🛑 Candle-close SL: {symbol} {direction.value} — "
+                    f"close={fmt_price(current_price)} breached SL={fmt_price(effective_sl)} "
+                    f"| Closing via market order"
+                )
+                try:
+                    closed = await self.exchange.force_close_symbol(symbol)
+                    if closed:
+                        state.has_position = False
+                        state._order_pending = False
+                        state.current_order = None
+                        state.trailing_state = "initial"
+                        return
+                except Exception as e:
+                    logger.error(f"Candle-close SL force-close failed: {e}")
+                return
 
         if direction == TradeDirection.LONG:
             profit_r = (current_price - entry_price) / risk
@@ -2724,10 +3200,10 @@ class StrategyEngine:
                 sl_dist_r = self._get_runner_sl_distance(profit_r)
                 current_trail = state.trailing_sl_price or sl_price
                 if direction == TradeDirection.LONG:
-                    candidate_sl = current_price - (risk * sl_dist_r)
+                    candidate_sl = current_price - (trail_unit * sl_dist_r)
                     new_sl = max(candidate_sl, current_trail)
                 else:
-                    candidate_sl = current_price + (risk * sl_dist_r)
+                    candidate_sl = current_price + (trail_unit * sl_dist_r)
                     new_sl = min(candidate_sl, current_trail)
                 # TP already set at force_close_at_r on entry — no need to change it
                 phase_change = "runner"
@@ -2735,19 +3211,35 @@ class StrategyEngine:
                     f"🚀 Phase 3 (Runner): {symbol} SL→{new_sl:.4f} "
                     f"(profit={profit_r:.1f}R, "
                     f"direct from initial because runner_at={runner_at:.2f}R "
-                    f"<= be_at={be_at:.2f}R)"
+                    f"<= be_at={be_at:.2f}R"
+                    f"{f', ATR={trail_atr:.4f}/{entry_atr:.4f}={atr_ratio:.2f}x' if atr_ratio else ''})"
                 )
             elif profit_r >= be_at:
                 lock_r = tpsl_cfg.trailing_be_lock_r
+                # Structural BE: use FVG zone edge if available (Pine-style)
+                fvg_bottom = order.get("fvg_bottom", 0)
+                fvg_top = order.get("fvg_top", 0)
                 if direction == TradeDirection.LONG:
-                    new_sl = entry_price + (risk * lock_r)
+                    be_sl = entry_price + (trail_unit * lock_r)
+                    # Pine-style: max(R-based BE, FVG zone edge - buffer)
+                    if fvg_bottom > 0:
+                        zone_be = fvg_bottom - (trail_unit * 0.1)  # small buffer below zone
+                        be_sl = max(be_sl, zone_be)
+                    new_sl = be_sl
                 else:
-                    new_sl = entry_price - (risk * lock_r)
+                    be_sl = entry_price - (trail_unit * lock_r)
+                    if fvg_top > 0:
+                        zone_be = fvg_top + (trail_unit * 0.1)
+                        be_sl = min(be_sl, zone_be)
+                    new_sl = be_sl
                 # TP already set at force_close_at_r on entry — no need to change it
                 phase_change = "breakeven"
                 logger.info(
                     f"🔒 Phase 2 (BE): {symbol} SL→{new_sl:.4f} "
-                    f"(entry+{lock_r}R locked, profit={profit_r:.1f}R)"
+                    f"(lock={lock_r}R, profit={profit_r:.1f}R"
+                    f"{f', zone_edge={fvg_bottom:.4f}' if direction == TradeDirection.LONG and fvg_bottom > 0 else ''}"
+                    f"{f', zone_edge={fvg_top:.4f}' if direction == TradeDirection.SHORT and fvg_top > 0 else ''}"
+                    f"{f', ATR={trail_atr:.4f}/{entry_atr:.4f}={atr_ratio:.2f}x' if atr_ratio else ''})"
                 )
 
         # ── Phase 3: Breakeven → Runner ──
@@ -2756,17 +3248,18 @@ class StrategyEngine:
                 sl_dist_r = self._get_runner_sl_distance(profit_r)
                 current_trail = state.trailing_sl_price or sl_price
                 if direction == TradeDirection.LONG:
-                    candidate_sl = current_price - (risk * sl_dist_r)
+                    candidate_sl = current_price - (trail_unit * sl_dist_r)
                     new_sl = max(candidate_sl, current_trail)
                 else:
-                    candidate_sl = current_price + (risk * sl_dist_r)
+                    candidate_sl = current_price + (trail_unit * sl_dist_r)
                     new_sl = min(candidate_sl, current_trail)
                 # TP already set at force_close_at_r on entry — no need to change it
                 phase_change = "runner"
                 logger.info(
                     f"🚀 Phase 3 (Runner): {symbol} SL→{new_sl:.4f} "
                     f"(profit={profit_r:.1f}R, SL={sl_dist_r:.2f}R behind, "
-                    f"clamped={'yes' if new_sl != candidate_sl else 'no'})"
+                    f"clamped={'yes' if new_sl != candidate_sl else 'no'}"
+                    f"{f', ATR={trail_atr:.4f}/{entry_atr:.4f}={atr_ratio:.2f}x' if atr_ratio else ''})"
                 )
             else:
                 # Progressive BE: slide SL as profit grows
@@ -2775,20 +3268,22 @@ class StrategyEngine:
                 step_r = tpsl_cfg.trailing_step_r
                 current_trail = state.trailing_sl_price or sl_price
                 if direction == TradeDirection.LONG:
-                    new_sl_candidate = entry_price + (risk * candidate_lock_r)
-                    if new_sl_candidate > current_trail + (risk * step_r):
+                    new_sl_candidate = entry_price + (trail_unit * candidate_lock_r)
+                    if new_sl_candidate > current_trail + (trail_unit * step_r):
                         new_sl = new_sl_candidate
                         logger.info(
                             f"🔒 Progressive BE: {symbol} SL→{new_sl:.4f} "
-                            f"(lock={candidate_lock_r:.2f}R, profit={profit_r:.1f}R)"
+                            f"(lock={candidate_lock_r:.2f}R, profit={profit_r:.1f}R"
+                            f"{f', ATR ratio={atr_ratio:.2f}x' if atr_ratio else ''})"
                         )
                 else:
-                    new_sl_candidate = entry_price - (risk * candidate_lock_r)
-                    if new_sl_candidate < current_trail - (risk * step_r):
+                    new_sl_candidate = entry_price - (trail_unit * candidate_lock_r)
+                    if new_sl_candidate < current_trail - (trail_unit * step_r):
                         new_sl = new_sl_candidate
                         logger.info(
                             f"🔒 Progressive BE: {symbol} SL→{new_sl:.4f} "
-                            f"(lock={candidate_lock_r:.2f}R, profit={profit_r:.1f}R)"
+                            f"(lock={candidate_lock_r:.2f}R, profit={profit_r:.1f}R"
+                            f"{f', ATR ratio={atr_ratio:.2f}x' if atr_ratio else ''})"
                         )
 
         # ── Runner: continuous SL sliding (tightens past 50% TP) ──
@@ -2798,14 +3293,14 @@ class StrategyEngine:
             current_trail = state.trailing_sl_price or sl_price
 
             if direction == TradeDirection.LONG:
-                candidate_sl = current_price - (risk * sl_dist_r)
+                candidate_sl = current_price - (trail_unit * sl_dist_r)
                 # Only move SL up (never down), and only if meaningful step
-                if candidate_sl > current_trail + (risk * step_r):
+                if candidate_sl > current_trail + (trail_unit * step_r):
                     new_sl = candidate_sl
             else:
-                candidate_sl = current_price + (risk * sl_dist_r)
+                candidate_sl = current_price + (trail_unit * sl_dist_r)
                 # Only move SL down (never up), and only if meaningful step
-                if candidate_sl < current_trail - (risk * step_r):
+                if candidate_sl < current_trail - (trail_unit * step_r):
                     new_sl = candidate_sl
 
         # ── Apply changes to exchange ──
@@ -2838,7 +3333,8 @@ class StrategyEngine:
                     sl_dist_r = self._get_runner_sl_distance(profit_r)
                     logger.info(
                         f"📈 Runner slide: {symbol} SL={new_sl:.4f} "
-                        f"({profit_r:.1f}R, trail={sl_dist_r:.2f}R)"
+                        f"({profit_r:.1f}R, trail={sl_dist_r:.2f}R"
+                        f"{f', ATR={trail_atr:.4f}/{entry_atr:.4f}={atr_ratio:.2f}x' if atr_ratio else ''})"
                     )
             else:
                 # API failed — check if position still exists

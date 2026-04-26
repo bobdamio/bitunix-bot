@@ -82,7 +82,7 @@ blacklist:
   - DOGEUSDT           # Apr KZ: Net=-$3.73. LONG 75%=great but SHORT 30%=-$7.68 destroys profit
   - BNBUSDT            # Apr KZ: Net=-$0.37. No edge — zero expectancy, not worth the fees
 
-# Trading Symbols (5 — Apr audit: these 5 = +$9.50 net in KZ vs all 11 = -$12.44)
+# Trading Symbols (5 symbols — rotation Apr 26 05:08)
 symbols:
   - BTCUSDT
   - ETHUSDT
